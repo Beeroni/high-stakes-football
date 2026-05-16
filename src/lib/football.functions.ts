@@ -52,6 +52,50 @@ async function cached<T>(key: string, loader: () => Promise<T>): Promise<T> {
   return data;
 }
 
+// ---------- Throttled request queue ----------
+// RapidAPI free tier on API-Football enforces ~10 req/min + 100 req/day.
+// Firing requests in parallel trips the per-minute limit and burns the
+// daily quota instantly, so we serialize and pace requests at ~8/minute.
+const MIN_GAP_MS = 7500; // ~8 req/min
+const COOLDOWN_MS = 60_000; // pause new calls for 1m after a 429
+
+type QueueState = {
+  chain: Promise<void>;
+  lastCall: number;
+  cooldownUntil: number;
+};
+
+function getQueue(): QueueState {
+  const g = globalThis as unknown as { __stakesfc_queue?: QueueState };
+  if (!g.__stakesfc_queue) {
+    g.__stakesfc_queue = { chain: Promise.resolve(), lastCall: 0, cooldownUntil: 0 };
+  }
+  return g.__stakesfc_queue;
+}
+
+function enqueue<T>(fn: () => Promise<T>): Promise<T> {
+  const q = getQueue();
+  // Fail-fast while cooling down so callers don't pile up for minutes.
+  if (Date.now() < q.cooldownUntil) {
+    return Promise.reject(
+      new Error("API-Football rate-limited — cooling down, try again shortly"),
+    );
+  }
+  const run = async (): Promise<T> => {
+    const now = Date.now();
+    const waitForGap = Math.max(0, q.lastCall + MIN_GAP_MS - now);
+    if (waitForGap > 0) await new Promise((r) => setTimeout(r, waitForGap));
+    q.lastCall = Date.now();
+    return fn();
+  };
+  const next = q.chain.then(run, run);
+  q.chain = next.then(
+    () => undefined,
+    () => undefined,
+  );
+  return next;
+}
+
 // ---------- API-Football fetch helper ----------
 async function apiFootball<T = unknown>(
   path: string,
@@ -61,16 +105,23 @@ async function apiFootball<T = unknown>(
   if (!key) throw new Error("RAPIDAPI_FOOTBALL_KEY is not set");
   const url = new URL(`https://api-football-v1.p.rapidapi.com/v3/${path}`);
   for (const [k, v] of Object.entries(params)) url.searchParams.set(k, String(v));
-  const res = await fetch(url.toString(), {
-    headers: {
-      "x-rapidapi-key": key,
-      "x-rapidapi-host": "api-football-v1.p.rapidapi.com",
-    },
+  return enqueue(async () => {
+    const res = await fetch(url.toString(), {
+      headers: {
+        "x-rapidapi-key": key,
+        "x-rapidapi-host": "api-football-v1.p.rapidapi.com",
+      },
+    });
+    if (res.status === 429) {
+      getQueue().cooldownUntil = Date.now() + COOLDOWN_MS;
+      throw new Error("API-Football 429 Too Many Requests (rate-limited, cooling down)");
+    }
+    if (!res.ok) throw new Error(`API-Football ${res.status} ${res.statusText}`);
+    const json = (await res.json()) as { response: T; errors?: unknown };
+    return json.response;
   });
-  if (!res.ok) throw new Error(`API-Football ${res.status} ${res.statusText}`);
-  const json = (await res.json()) as { response: T; errors?: unknown };
-  return json.response;
 }
+
 
 // ---------- Domain logic ----------
 type StandingRow = {
