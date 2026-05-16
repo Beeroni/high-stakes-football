@@ -1,11 +1,14 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useMemo, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { useServerFn } from "@tanstack/react-start";
 import { LEAGUES } from "@/data/leagues";
-import { MATCHES } from "@/data/matches";
+import { MATCHES, type Match } from "@/data/matches";
 import { LeagueSidebar } from "@/components/LeagueSidebar";
 import { StakeFilter, type StakeFilterValue } from "@/components/StakeFilter";
 import { MatchCard } from "@/components/MatchCard";
-import { Flame, Search } from "lucide-react";
+import { getLiveMatches } from "@/lib/football.functions";
+import { Flame, Search, RefreshCw } from "lucide-react";
 
 export const Route = createFileRoute("/")({
   head: () => ({
@@ -42,10 +45,39 @@ function Dashboard() {
     });
   };
 
-  const byLeague = useMemo(
-    () => MATCHES.filter((m) => selectedLeagues.has(m.leagueId)),
+  const leagueIdsKey = useMemo(
+    () => [...selectedLeagues].sort().join(","),
     [selectedLeagues],
   );
+
+  const fetchLive = useServerFn(getLiveMatches);
+  const liveQuery = useQuery({
+    queryKey: ["live-matches", leagueIdsKey],
+    queryFn: () => fetchLive({ data: { leagueIds: leagueIdsKey.split(",").filter(Boolean) } }),
+    enabled: leagueIdsKey.length > 0,
+    staleTime: 60 * 60 * 1000, // 1h client cache (server caches 12h)
+    refetchOnWindowFocus: false,
+  });
+
+  const byLeague = useMemo<Match[]>(() => {
+    const liveByLeague = new Map<string, Match[]>();
+    if (liveQuery.data) {
+      for (const l of liveQuery.data.leagues) {
+        if (l.matches) liveByLeague.set(l.leagueId, l.matches);
+      }
+    }
+    const out: Match[] = [];
+    for (const id of selectedLeagues) {
+      const live = liveByLeague.get(id);
+      if (live && live.length > 0) {
+        out.push(...live);
+      } else {
+        // Fallback: mock data for leagues the API didn't return (or while loading)
+        out.push(...MATCHES.filter((m) => m.leagueId === id));
+      }
+    }
+    return out;
+  }, [selectedLeagues, liveQuery.data]);
 
   const counts = useMemo(() => {
     const c = { all: byLeague.length, relegation: 0, title: 0, continental: 0 };
@@ -108,6 +140,12 @@ function Dashboard() {
           </div>
 
           <div className="flex items-center gap-2 text-xs">
+            {liveQuery.isFetching && (
+              <span className="flex items-center gap-1.5 rounded-full bg-secondary px-2.5 py-1 font-semibold text-secondary-foreground">
+                <RefreshCw className="h-3 w-3 animate-spin" />
+                Syncing
+              </span>
+            )}
             {liveCount > 0 && (
               <span className="flex items-center gap-1.5 rounded-full bg-destructive/15 px-2.5 py-1 font-bold uppercase tracking-wider text-destructive">
                 <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-destructive" />
