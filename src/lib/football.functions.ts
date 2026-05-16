@@ -75,12 +75,16 @@ function getQueue(): QueueState {
 
 function enqueue<T>(fn: () => Promise<T>): Promise<T> {
   const q = getQueue();
+  // Fail-fast while cooling down so callers don't pile up for minutes.
+  if (Date.now() < q.cooldownUntil) {
+    return Promise.reject(
+      new Error("API-Football rate-limited — cooling down, try again shortly"),
+    );
+  }
   const run = async (): Promise<T> => {
     const now = Date.now();
-    const waitForCooldown = Math.max(0, q.cooldownUntil - now);
     const waitForGap = Math.max(0, q.lastCall + MIN_GAP_MS - now);
-    const wait = Math.max(waitForCooldown, waitForGap);
-    if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+    if (waitForGap > 0) await new Promise((r) => setTimeout(r, waitForGap));
     q.lastCall = Date.now();
     return fn();
   };
