@@ -7,8 +7,9 @@ import { Calendar, Radio } from "lucide-react";
 export function MatchCard({ match }: { match: Match }) {
   const league = LEAGUES.find((l) => l.id === match.leagueId)!;
   const date = new Date(match.date);
-  const dateStr = date.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
-  const timeStr = date.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+  // Use fixed locale + UTC so SSR and client render identical strings (no hydration mismatch).
+  const dateStr = date.toLocaleDateString("en-GB", { weekday: "short", month: "short", day: "numeric", timeZone: "UTC" });
+  const timeStr = date.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", timeZone: "UTC", hour12: false }) + " UTC";
 
   return (
     <article className="group relative overflow-hidden rounded-xl border border-border bg-card transition hover:border-primary/40 hover:shadow-[0_0_0_1px_var(--primary)]/20">
