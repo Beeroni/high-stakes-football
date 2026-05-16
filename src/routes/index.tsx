@@ -1,6 +1,6 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useMemo, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useServerFn } from "@tanstack/react-start";
 import { LEAGUES } from "@/data/leagues";
 import { MATCHES, type Match } from "@/data/matches";
@@ -51,6 +51,7 @@ function Dashboard() {
   );
 
   const fetchLive = useServerFn(getLiveMatches);
+  const queryClient = useQueryClient();
   const liveQuery = useQuery({
     queryKey: ["live-matches", leagueIdsKey],
     queryFn: () => fetchLive({ data: { leagueIds: leagueIdsKey.split(",").filter(Boolean) } }),
@@ -140,6 +141,14 @@ function Dashboard() {
           </div>
 
           <div className="flex items-center gap-2 text-xs">
+            <button
+              onClick={() => queryClient.invalidateQueries({ queryKey: ["live-matches"] })}
+              disabled={liveQuery.isFetching}
+              className="flex items-center gap-1.5 rounded-full bg-secondary px-2.5 py-1 font-semibold text-secondary-foreground transition-colors hover:bg-secondary/80 disabled:opacity-50"
+            >
+              <RefreshCw className={liveQuery.isFetching ? "h-3 w-3 animate-spin" : "h-3 w-3"} />
+              Refresh
+            </button>
             {liveQuery.isFetching && (
               <span className="flex items-center gap-1.5 rounded-full bg-secondary px-2.5 py-1 font-semibold text-secondary-foreground">
                 <RefreshCw className="h-3 w-3 animate-spin" />
