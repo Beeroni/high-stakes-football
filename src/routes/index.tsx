@@ -51,6 +51,7 @@ function Dashboard() {
   );
 
   const fetchLive = useServerFn(getLiveMatches);
+  const queryClient = useQueryClient();
   const liveQuery = useQuery({
     queryKey: ["live-matches", leagueIdsKey],
     queryFn: () => fetchLive({ data: { leagueIds: leagueIdsKey.split(",").filter(Boolean) } }),
