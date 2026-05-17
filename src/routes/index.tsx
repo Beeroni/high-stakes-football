@@ -1,9 +1,9 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useServerFn } from "@tanstack/react-start";
 import { LEAGUES } from "@/data/leagues";
-import { MATCHES, type Match } from "@/data/matches";
+import { type Match } from "@/data/matches";
 import { LeagueSidebar } from "@/components/LeagueSidebar";
 import { StakeFilter, type StakeFilterValue } from "@/components/StakeFilter";
 import { MatchCard } from "@/components/MatchCard";
@@ -56,29 +56,22 @@ function Dashboard() {
     queryKey: ["live-matches", leagueIdsKey],
     queryFn: () => fetchLive({ data: { leagueIds: leagueIdsKey.split(",").filter(Boolean) } }),
     enabled: leagueIdsKey.length > 0,
-    staleTime: 60 * 60 * 1000, // 1h client cache (server caches 12h)
+    staleTime: 5 * 60 * 1000, // 5min client cache, matches server cache
+    refetchInterval: 5 * 60 * 1000,
     refetchOnWindowFocus: false,
   });
 
+  const lastRefreshRef = useRef(0);
+  const handleRefresh = () => {
+    const now = Date.now();
+    if (now - lastRefreshRef.current < 30_000) return; // throttle to 1/30s
+    lastRefreshRef.current = now;
+    queryClient.invalidateQueries({ queryKey: ["live-matches"] });
+  };
+
   const byLeague = useMemo<Match[]>(() => {
-    const liveByLeague = new Map<string, Match[]>();
-    if (liveQuery.data) {
-      for (const l of liveQuery.data.leagues) {
-        if (l.matches) liveByLeague.set(l.leagueId, l.matches);
-      }
-    }
-    const out: Match[] = [];
-    for (const id of selectedLeagues) {
-      const live = liveByLeague.get(id);
-      if (live && live.length > 0) {
-        out.push(...live);
-      } else {
-        // Fallback: mock data for leagues the API didn't return (or while loading)
-        out.push(...MATCHES.filter((m) => m.leagueId === id));
-      }
-    }
-    return out;
-  }, [selectedLeagues, liveQuery.data]);
+    return liveQuery.data?.matches ?? [];
+  }, [liveQuery.data]);
 
   const counts = useMemo(() => {
     const c = { all: byLeague.length, relegation: 0, title: 0, continental: 0 };
@@ -142,7 +135,7 @@ function Dashboard() {
 
           <div className="flex items-center gap-2 text-xs">
             <button
-              onClick={() => queryClient.invalidateQueries({ queryKey: ["live-matches"] })}
+              onClick={handleRefresh}
               disabled={liveQuery.isFetching}
               className="flex items-center gap-1.5 rounded-full bg-secondary px-2.5 py-1 font-semibold text-secondary-foreground transition-colors hover:bg-secondary/80 disabled:opacity-50"
             >
@@ -189,9 +182,15 @@ function Dashboard() {
 
           {filtered.length === 0 ? (
             <div className="rounded-xl border border-dashed border-border bg-card/40 px-6 py-16 text-center">
-              <p className="font-display text-lg font-semibold">No matches found</p>
+              <p className="font-display text-lg font-semibold">
+                No matches currently past the 65th minute
+              </p>
               <p className="mt-1 text-sm text-muted-foreground">
-                Try selecting more leagues or clearing the filter.
+                {liveQuery.isFetching
+                  ? "Checking live fixtures…"
+                  : liveQuery.data?.error
+                    ? liveQuery.data.error
+                    : "Check back closer to full-time for in-play matches with settled odds."}
               </p>
             </div>
           ) : (

@@ -32,10 +32,17 @@ const API_LEAGUE: Record<string, { id: number; season: number }> = {
   csl: { id: 169, season: 2026 },
 };
 
-// ---------- Server-side cache (per-isolate). 12h TTL keeps us comfortably
-// under the 100 req/day RapidAPI free tier even across many visitors. ----------
+// Reverse map: API-Football league id -> our internal league id.
+const API_TO_INTERNAL = new Map<number, string>(
+  Object.entries(API_LEAGUE).map(([k, v]) => [v.id, k]),
+);
+
+// ---------- Server-side cache (per-isolate). ----------
+// Live endpoint: 5min — the "minute >= 65" check has minute granularity.
+// Standings: 24h — table positions barely shift mid-day.
 type CacheEntry<T> = { data: T; expires: number };
-const TTL_MS = 12 * 60 * 60 * 1000;
+const LIVE_TTL_MS = 5 * 60 * 1000;
+const STANDINGS_TTL_MS = 24 * 60 * 60 * 1000;
 
 function getCache(): Map<string, CacheEntry<unknown>> {
   const g = globalThis as unknown as { __stakesfc_cache?: Map<string, CacheEntry<unknown>> };
@@ -43,42 +50,62 @@ function getCache(): Map<string, CacheEntry<unknown>> {
   return g.__stakesfc_cache;
 }
 
-async function cached<T>(key: string, loader: () => Promise<T>): Promise<T> {
+async function cached<T>(key: string, ttl: number, loader: () => Promise<T>): Promise<T> {
   const cache = getCache();
   const hit = cache.get(key) as CacheEntry<T> | undefined;
   if (hit && hit.expires > Date.now()) return hit.data;
   const data = await loader();
-  cache.set(key, { data, expires: Date.now() + TTL_MS });
+  cache.set(key, { data, expires: Date.now() + ttl });
   return data;
 }
 
-// ---------- Throttled request queue ----------
-// RapidAPI free tier on API-Football enforces ~10 req/min + 100 req/day.
-// Firing requests in parallel trips the per-minute limit and burns the
-// daily quota instantly, so we serialize and pace requests at ~8/minute.
+// ---------- Throttled request queue + daily budget ----------
 const MIN_GAP_MS = 7500; // ~8 req/min
-const COOLDOWN_MS = 60_000; // pause new calls for 1m after a 429
+const COOLDOWN_MS = 60_000;
+const DAILY_BUDGET = 90; // leave a 10-call buffer under the 100/day limit
 
 type QueueState = {
   chain: Promise<void>;
   lastCall: number;
   cooldownUntil: number;
+  dayKey: string;
+  dayCount: number;
 };
+
+function todayKey(): string {
+  return new Date().toISOString().slice(0, 10);
+}
 
 function getQueue(): QueueState {
   const g = globalThis as unknown as { __stakesfc_queue?: QueueState };
   if (!g.__stakesfc_queue) {
-    g.__stakesfc_queue = { chain: Promise.resolve(), lastCall: 0, cooldownUntil: 0 };
+    g.__stakesfc_queue = {
+      chain: Promise.resolve(),
+      lastCall: 0,
+      cooldownUntil: 0,
+      dayKey: todayKey(),
+      dayCount: 0,
+    };
   }
-  return g.__stakesfc_queue;
+  const q = g.__stakesfc_queue;
+  const today = todayKey();
+  if (q.dayKey !== today) {
+    q.dayKey = today;
+    q.dayCount = 0;
+  }
+  return q;
 }
 
 function enqueue<T>(fn: () => Promise<T>): Promise<T> {
   const q = getQueue();
-  // Fail-fast while cooling down so callers don't pile up for minutes.
   if (Date.now() < q.cooldownUntil) {
     return Promise.reject(
       new Error("API-Football rate-limited — cooling down, try again shortly"),
+    );
+  }
+  if (q.dayCount >= DAILY_BUDGET) {
+    return Promise.reject(
+      new Error("Daily API-Football budget reached — resets at UTC midnight"),
     );
   }
   const run = async (): Promise<T> => {
@@ -86,6 +113,7 @@ function enqueue<T>(fn: () => Promise<T>): Promise<T> {
     const waitForGap = Math.max(0, q.lastCall + MIN_GAP_MS - now);
     if (waitForGap > 0) await new Promise((r) => setTimeout(r, waitForGap));
     q.lastCall = Date.now();
+    q.dayCount++;
     return fn();
   };
   const next = q.chain.then(run, run);
@@ -122,7 +150,6 @@ async function apiFootball<T = unknown>(
   });
 }
 
-
 // ---------- Domain logic ----------
 type StandingRow = {
   rank: number;
@@ -134,8 +161,9 @@ type Standings = Array<{
   league: { standings: StandingRow[][] };
 }>;
 
-type Fixture = {
+type LiveFixture = {
   fixture: { id: number; date: string; status: { short: string; elapsed: number | null } };
+  league: { id: number; season: number };
   teams: { home: { id: number; name: string }; away: { id: number; name: string } };
   goals: { home: number | null; away: number | null };
 };
@@ -152,7 +180,6 @@ function shortName(name: string): string {
 }
 
 function colorFor(name: string): string {
-  // Deterministic muted color from team name — looks ok in dark UI.
   let h = 0;
   for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) >>> 0;
   const hue = h % 360;
@@ -179,7 +206,7 @@ function buildLabel(stakes: StakeType[]): string {
   if (stakes.includes("title")) return "Title Race";
   if (stakes.includes("relegation")) return "Relegation Battle";
   if (stakes.includes("continental")) return "European Qualification";
-  return "";
+  return "Live · Past 65'";
 }
 
 function buildExplainer(
@@ -192,9 +219,7 @@ function buildExplainer(
   parts.push(
     `${home.name} (${ordinal(home.position)}, ${home.points} pts) vs ${away.name} (${ordinal(away.position)}, ${away.points} pts).`,
   );
-  if (stakes.includes("title")) {
-    parts.push("Three points here could swing the title race.");
-  }
+  if (stakes.includes("title")) parts.push("Three points here could swing the title race.");
   if (stakes.includes("relegation")) {
     const dangerTeam =
       home.position >= total - 2 ? home.name : away.position >= total - 2 ? away.name : null;
@@ -206,72 +231,31 @@ function buildExplainer(
   return parts.join(" ");
 }
 
-function mapStatus(short: string): "live" | "upcoming" | "finished" {
-  if (["1H", "2H", "HT", "ET", "BT", "P", "LIVE"].includes(short)) return "live";
-  if (["FT", "AET", "PEN"].includes(short)) return "finished";
-  return "upcoming";
-}
+// In-play status codes where `elapsed` reflects real match minute (excludes HT).
+const IN_PLAY = new Set(["2H", "ET", "BT", "P", "LIVE"]);
+const MIN_MINUTE = 65;
 
-async function fetchLeagueMatches(leagueId: string): Promise<Match[] | null> {
+async function fetchStandings(
+  leagueId: string,
+): Promise<{ lookup: Map<number, { position: number; points: number }>; total: number } | null> {
   const cfg = API_LEAGUE[leagueId];
   if (!cfg) return null;
-
-  return cached(`league:${leagueId}:${cfg.season}`, async () => {
-    const [standings, fixtures] = await Promise.all([
-      apiFootball<Standings>("standings", { league: cfg.id, season: cfg.season }),
-      apiFootball<Fixture[]>("fixtures", { league: cfg.id, season: cfg.season, next: 12 }),
-    ]);
-
+  return cached(`standings:${leagueId}:${cfg.season}`, STANDINGS_TTL_MS, async () => {
+    const standings = await apiFootball<Standings>("standings", {
+      league: cfg.id,
+      season: cfg.season,
+    });
     const table = standings[0]?.league.standings[0] ?? [];
-    if (table.length === 0) return [];
     const lookup = new Map<number, { position: number; points: number }>();
     for (const row of table) lookup.set(row.team.id, { position: row.rank, points: row.points });
-    const total = table.length;
-
-    const matches: Match[] = [];
-    for (const fx of fixtures) {
-      const h = lookup.get(fx.teams.home.id);
-      const a = lookup.get(fx.teams.away.id);
-      if (!h || !a) continue;
-      const stakes = computeStakes(h.position, a.position, total);
-      if (stakes.length === 0) continue; // only show stakes-relevant matches
-
-      const homeTeam = {
-        name: fx.teams.home.name,
-        short: shortName(fx.teams.home.name),
-        position: h.position,
-        points: h.points,
-        color: colorFor(fx.teams.home.name),
-      };
-      const awayTeam = {
-        name: fx.teams.away.name,
-        short: shortName(fx.teams.away.name),
-        position: a.position,
-        points: a.points,
-        color: colorFor(fx.teams.away.name),
-      };
-
-      const status = mapStatus(fx.fixture.status.short);
-      if (status === "finished") continue;
-
-      matches.push({
-        id: `${leagueId}-${fx.fixture.id}`,
-        leagueId,
-        date: fx.fixture.date,
-        status,
-        liveMinute: status === "live" ? fx.fixture.status.elapsed ?? undefined : undefined,
-        homeScore: fx.goals.home ?? undefined,
-        awayScore: fx.goals.away ?? undefined,
-        home: homeTeam,
-        away: awayTeam,
-        stakes,
-        stakesLabel: buildLabel(stakes),
-        stakesExplainer: buildExplainer(homeTeam, awayTeam, total, stakes),
-      });
-    }
-
-    return matches;
+    return { lookup, total: table.length };
   });
+}
+
+async function fetchLiveFixtures(): Promise<LiveFixture[]> {
+  return cached("live:all", LIVE_TTL_MS, async () =>
+    apiFootball<LiveFixture[]>("fixtures", { live: "all" }),
+  );
 }
 
 export const getLiveMatches = createServerFn({ method: "POST" })
@@ -281,20 +265,89 @@ export const getLiveMatches = createServerFn({ method: "POST" })
     }),
   )
   .handler(async ({ data }) => {
-    const results = await Promise.all(
-      data.leagueIds.map(async (id) => {
-        try {
-          const matches = await fetchLeagueMatches(id);
-          return { leagueId: id, matches, error: null as string | null };
-        } catch (err) {
-          console.error(`[football] ${id} failed:`, err);
-          return {
-            leagueId: id,
-            matches: null,
-            error: err instanceof Error ? err.message : "unknown",
-          };
-        }
-      }),
-    );
-    return { leagues: results };
+    const selected = new Set(data.leagueIds);
+
+    let live: LiveFixture[];
+    try {
+      live = await fetchLiveFixtures();
+    } catch (err) {
+      console.error("[football] live fetch failed:", err);
+      return {
+        matches: [] as Match[],
+        error: err instanceof Error ? err.message : "unknown",
+        budget: getQueue().dayCount,
+      };
+    }
+
+    // Filter to: configured league, selected by user, past 65', actually in play.
+    const qualifying = live.filter((fx) => {
+      const internal = API_TO_INTERNAL.get(fx.league.id);
+      if (!internal || !selected.has(internal)) return false;
+      if (!IN_PLAY.has(fx.fixture.status.short)) return false;
+      const minute = fx.fixture.status.elapsed ?? 0;
+      return minute >= MIN_MINUTE;
+    });
+
+    // Group by league so we only fetch each league's standings once.
+    const byLeague = new Map<string, LiveFixture[]>();
+    for (const fx of qualifying) {
+      const internal = API_TO_INTERNAL.get(fx.league.id)!;
+      const arr = byLeague.get(internal) ?? [];
+      arr.push(fx);
+      byLeague.set(internal, arr);
+    }
+
+    const matches: Match[] = [];
+    for (const [leagueId, fixtures] of byLeague) {
+      let standings: { lookup: Map<number, { position: number; points: number }>; total: number } | null = null;
+      try {
+        standings = await fetchStandings(leagueId);
+      } catch (err) {
+        console.error(`[football] standings ${leagueId} failed:`, err);
+      }
+
+      for (const fx of fixtures) {
+        const h = standings?.lookup.get(fx.teams.home.id);
+        const a = standings?.lookup.get(fx.teams.away.id);
+        const total = standings?.total ?? 20;
+        const homePos = h?.position ?? 0;
+        const awayPos = a?.position ?? 0;
+        const stakes = h && a ? computeStakes(homePos, awayPos, total) : [];
+
+        const homeTeam = {
+          name: fx.teams.home.name,
+          short: shortName(fx.teams.home.name),
+          position: homePos,
+          points: h?.points ?? 0,
+          color: colorFor(fx.teams.home.name),
+        };
+        const awayTeam = {
+          name: fx.teams.away.name,
+          short: shortName(fx.teams.away.name),
+          position: awayPos,
+          points: a?.points ?? 0,
+          color: colorFor(fx.teams.away.name),
+        };
+
+        matches.push({
+          id: `${leagueId}-${fx.fixture.id}`,
+          leagueId,
+          date: fx.fixture.date,
+          status: "live",
+          liveMinute: fx.fixture.status.elapsed ?? undefined,
+          homeScore: fx.goals.home ?? undefined,
+          awayScore: fx.goals.away ?? undefined,
+          home: homeTeam,
+          away: awayTeam,
+          stakes,
+          stakesLabel: buildLabel(stakes),
+          stakesExplainer:
+            h && a
+              ? buildExplainer(homeTeam, awayTeam, total, stakes)
+              : `${fx.teams.home.name} vs ${fx.teams.away.name} — live past the 65th minute.`,
+        });
+      }
+    }
+
+    return { matches, error: null as string | null, budget: getQueue().dayCount };
   });
