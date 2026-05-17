@@ -1,26 +1,46 @@
 ## Goal
 
-Replace the current mock fixtures in `src/data/matches.ts` with a realistic, season run-in dataset for mid-May 2026 — the actual climax week for most top leagues — so every card reflects a plausible matchup with correct teams, league positions, and stakes.
+Show only **in-play matches past the 65th minute** (the betting-relevant window), and use that constraint to slash API usage so we never hit the throttle.
+
+## Why this saves requests
+
+Today we loop 25 leagues × 2 endpoints (standings + fixtures) = ~50 calls per cold load. The API-Football `/fixtures?live=all` endpoint returns **every live match in the world in a single call**. Filtering client-side to `minute >= 65` means most polls cost just 1 request, and we only pull standings for the handful of leagues that actually have a qualifying live match.
 
 ## Approach
 
-1. **Research current standings** (websearch) for each of the 25 leagues to pull near-final 2025-26 table positions for relegation zone, title race, and continental qualification spots. Sources: official league sites, ESPN, BBC, transfermarkt.
-2. **Rewrite `src/data/matches.ts`** with ~32–40 matches dated within May 9–24, 2026, ensuring:
-   - Real club names that actually play in each league this season (e.g. Leicester is in Championship 25-26, not PL).
-   - League positions reflect the actual current table (within reason).
-   - `stakesLabel` and `stakesExplainer` use accurate point gaps and consequences.
-   - Every category (relegation / title-promotion / continental) is well-represented across Europe, Latin America, Asia.
-   - Note: many Latin American leagues (Brasileirão, Liga MX Clausura) and Asian leagues (J1) are on different calendars — use fixtures appropriate to their May 2026 state (e.g. Brasileirão early-season, Liga MX Clausura playoffs, J1 mid-season ACL spots).
-3. **Update `src/data/leagues.ts`** only if any team primary colors are missing for newly introduced clubs.
-4. **Quiet fix**: the hydration mismatch on match times (server vs. client timezone formatting in `MatchCard.tsx`) — render times in a fixed timezone (UTC) or pre-format the string in the data layer so SSR and client agree.
+Rewrite `src/lib/football.functions.ts` around a live-first strategy:
+
+1. **One call for live data**: `GET /fixtures?live=all` → returns all in-play fixtures across all leagues. Filter to `fixture.status.elapsed >= 65` and `status.short in ['2H','ET','BT','P','LIVE']` (exclude HT and finished).
+2. **Filter by configured leagues**: keep only fixtures whose `league.id` is in our `LEAGUE_MAP` (the 25 leagues we support).
+3. **Lazy standings**: for each league that has ≥1 qualifying live match, fetch its standings (cached 12h per league as today). Leagues with no qualifying live matches cost 0 extra calls.
+4. **Short cache for the live call**: 60s server-side cache on `/fixtures?live=all` (a match's minute only advances every minute anyway). Client `staleTime` stays at 60s.
+5. **Hard request budget**: keep the existing throttle queue, but tighten daily budget tracking — abort early if today's used calls > 90.
+
+## Request math
+
+- Worst case during peak European Saturday (say 10 leagues with qualifying matches): 1 (live) + 10 (standings, cached 12h) = 11 calls, then 1 call/min for live refresh.
+- Off-peak: 1 call/min, standings already cached.
+- Daily ceiling with 60s polling for 8 active hours = ~480 polls → **way over 100/day**.
+
+**Adjustment**: bump the live-fixtures cache to **5 minutes** server-side (minute precision is fine for "is this past 65'?"). That's ~12 calls/hour × ~8 active hours = ~96 calls + standings = still tight. So:
+- Live endpoint cached **5 min** server-side.
+- Manual "Refresh" button bypasses cache (capped to once per 30s client-side).
+- Standings cached **24h** (positions change rarely mid-day).
+
+## UI changes
+
+- `src/routes/index.tsx`: empty state copy → "No matches currently past the 65th minute. Check back closer to full-time."
+- Drop the league-by-league fallback to mock data (mock matches don't have a live minute, so they'd never qualify). Show only real qualifying live matches; if none, show empty state.
+- Keep the Refresh button; rate-limit it to one click per 30s.
 
 ## Out of scope
 
-- No API integration, no schema changes, no UI/layout changes.
-- Filtering, sidebar, and components remain untouched.
+- No schema changes to `Match`.
+- No changes to standings rendering, stake computation, or card UI.
+- Mock data file stays for design-time use but isn't merged into the live list anymore.
 
 ## Technical notes
 
-- Keep the existing `Match` interface as-is so components don't need edits.
-- For each league, include 1–2 matches; prioritize the leagues with the most dramatic late-season stakes (PL, La Liga, Serie A, Bundesliga, Ligue 1, Championship, Eredivisie, Primeira, Liga MX, Brasileirão, MLS, Saudi Pro, J1).
-- Time fix: format `match.date` with `toLocaleTimeString('en-US', { timeZone: 'UTC', ... })` so SSR (UTC) matches client.
+- API-Football live status codes treated as "in play": `1H, HT, 2H, ET, BT, P, LIVE`. We filter to `elapsed >= 65` AND `short != 'HT'`.
+- `elapsed` from the API is the displayed minute (includes injury time as 45+x / 90+x via `extra`).
+- Throttle queue + 429 cooldown stay in place as a safety net.
