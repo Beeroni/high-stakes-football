@@ -144,16 +144,20 @@ function Dashboard() {
           <div className="flex items-center gap-2 text-xs">
             <button
               onClick={handleRefresh}
-              disabled={liveQuery.isFetching}
+              disabled={refreshDisabled}
+              title={apiError ?? undefined}
               className="flex items-center gap-1.5 rounded-full bg-secondary px-2.5 py-1 font-semibold text-secondary-foreground transition-colors hover:bg-secondary/80 disabled:opacity-50"
             >
-              <RefreshCw className={liveQuery.isFetching ? "h-3 w-3 animate-spin" : "h-3 w-3"} />
-              Refresh
+              <RefreshCw className={`h-3 w-3 ${liveQuery.isFetching ? "animate-spin" : ""}`} />
+              {liveQuery.isFetching
+                ? "Refreshing"
+                : cooldownRemaining > 0
+                  ? `Wait ${cooldownRemaining}s`
+                  : "Refresh"}
             </button>
-            {liveQuery.isFetching && (
-              <span className="flex items-center gap-1.5 rounded-full bg-secondary px-2.5 py-1 font-semibold text-secondary-foreground">
-                <RefreshCw className="h-3 w-3 animate-spin" />
-                Syncing
+            {apiError && (
+              <span className="flex items-center gap-1.5 rounded-full bg-destructive/15 px-2.5 py-1 font-bold uppercase tracking-wider text-destructive" title={apiError}>
+                API error
               </span>
             )}
             {liveCount > 0 && (
