@@ -8,11 +8,19 @@ export interface Match {
   liveMinute?: number;
   homeScore?: number;
   awayScore?: number;
-  home: { name: string; short: string; position: number; points: number; color: string };
-  away: { name: string; short: string; position: number; points: number; color: string };
+  home: { name: string; short: string; position: number; points: number; color: string; threshold?: Threshold };
+  away: { name: string; short: string; position: number; points: number; color: string; threshold?: Threshold };
   stakes: StakeType[];
   stakesLabel: string;
   stakesExplainer: string;
+}
+
+export interface Threshold {
+  // e.g. "+2 above safety", "-3 from Europe", "+1 UCL cushion", "Leader", "-4 to title"
+  label: string;
+  // Positive = cushion / safe; negative = needs to make up ground; 0 = on the line
+  delta: number;
+  kind: "title" | "continental" | "relegation" | "neutral";
 }
 
 // Realistic run-in fixtures for the 2025–26 season (mid-to-late May 2026).

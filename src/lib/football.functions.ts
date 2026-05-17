@@ -1,6 +1,6 @@
 import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
-import type { Match } from "@/data/matches";
+import type { Match, Threshold } from "@/data/matches";
 import type { StakeType } from "@/data/leagues";
 
 // Map our internal league IDs to API-Football's IDs + the current season.
@@ -144,6 +144,14 @@ async function apiFootball<T = unknown>(
       getQueue().cooldownUntil = Date.now() + COOLDOWN_MS;
       throw new Error("API-Football 429 Too Many Requests (rate-limited, cooling down)");
     }
+    if (res.status === 401 || res.status === 403) {
+      // Hard auth/plan error — stop hammering for the rest of the day.
+      const q = getQueue();
+      q.cooldownUntil = Date.now() + 24 * 60 * 60 * 1000;
+      throw new Error(
+        `API-Football ${res.status} — your RapidAPI key or plan is being rejected. Check the RAPIDAPI_FOOTBALL_KEY value and that your RapidAPI subscription has access to api-football-v1.`,
+      );
+    }
     if (!res.ok) throw new Error(`API-Football ${res.status} ${res.statusText}`);
     const json = (await res.json()) as { response: T; errors?: unknown };
     return json.response;
@@ -231,13 +239,75 @@ function buildExplainer(
   return parts.join(" ");
 }
 
+// Continental cutoff = top 4; relegation cutoff = bottom 3 (rank > total - 3).
+const CONTINENTAL_CUTOFF = 4;
+const RELEGATION_SIZE = 3;
+
+function computeThreshold(
+  position: number,
+  points: number,
+  pointsByRank: number[],
+  total: number,
+): Threshold {
+  const relegationLine = total - RELEGATION_SIZE; // last safe rank
+  // Title context
+  if (position === 1) {
+    const second = pointsByRank[1] ?? points;
+    const lead = points - second;
+    return { label: lead > 0 ? `+${lead} lead at top` : "Tied at top", delta: lead, kind: "title" };
+  }
+  if (position === 2) {
+    const first = pointsByRank[0] ?? points;
+    const gap = points - first; // negative
+    return { label: `${gap} to title`, delta: gap, kind: "title" };
+  }
+  // Relegation zone or fighting near it
+  if (position > relegationLine) {
+    // In drop zone — gap to safety (negative)
+    const safety = pointsByRank[relegationLine - 1] ?? points;
+    const gap = points - safety;
+    return { label: `${gap} to safety`, delta: gap, kind: "relegation" };
+  }
+  if (position >= relegationLine - 1) {
+    // Just above the line — cushion above first drop spot
+    const firstDrop = pointsByRank[relegationLine] ?? points;
+    const cushion = points - firstDrop;
+    return {
+      label: cushion > 0 ? `+${cushion} above drop` : "On the drop line",
+      delta: cushion,
+      kind: "relegation",
+    };
+  }
+  // Continental window
+  if (position <= CONTINENTAL_CUTOFF) {
+    const firstOut = pointsByRank[CONTINENTAL_CUTOFF] ?? points;
+    const cushion = points - firstOut;
+    return {
+      label: cushion > 0 ? `+${cushion} UCL cushion` : "On the UCL line",
+      delta: cushion,
+      kind: "continental",
+    };
+  }
+  if (position <= CONTINENTAL_CUTOFF + 3) {
+    const lastIn = pointsByRank[CONTINENTAL_CUTOFF - 1] ?? points;
+    const gap = points - lastIn; // negative
+    return { label: `${gap} from Europe`, delta: gap, kind: "continental" };
+  }
+  // Mid-table
+  return { label: "Mid-table", delta: 0, kind: "neutral" };
+}
+
 // In-play status codes where `elapsed` reflects real match minute (excludes HT).
 const IN_PLAY = new Set(["2H", "ET", "BT", "P", "LIVE"]);
 const MIN_MINUTE = 65;
 
 async function fetchStandings(
   leagueId: string,
-): Promise<{ lookup: Map<number, { position: number; points: number }>; total: number } | null> {
+): Promise<{
+  lookup: Map<number, { position: number; points: number }>;
+  pointsByRank: number[]; // index 0 = rank 1
+  total: number;
+} | null> {
   const cfg = API_LEAGUE[leagueId];
   if (!cfg) return null;
   return cached(`standings:${leagueId}:${cfg.season}`, STANDINGS_TTL_MS, async () => {
@@ -247,8 +317,12 @@ async function fetchStandings(
     });
     const table = standings[0]?.league.standings[0] ?? [];
     const lookup = new Map<number, { position: number; points: number }>();
-    for (const row of table) lookup.set(row.team.id, { position: row.rank, points: row.points });
-    return { lookup, total: table.length };
+    const pointsByRank: number[] = [];
+    for (const row of table) {
+      lookup.set(row.team.id, { position: row.rank, points: row.points });
+      pointsByRank[row.rank - 1] = row.points;
+    }
+    return { lookup, pointsByRank, total: table.length };
   });
 }
 
@@ -299,7 +373,7 @@ export const getLiveMatches = createServerFn({ method: "POST" })
 
     const matches: Match[] = [];
     for (const [leagueId, fixtures] of byLeague) {
-      let standings: { lookup: Map<number, { position: number; points: number }>; total: number } | null = null;
+      let standings: Awaited<ReturnType<typeof fetchStandings>> = null;
       try {
         standings = await fetchStandings(leagueId);
       } catch (err) {
@@ -314,12 +388,20 @@ export const getLiveMatches = createServerFn({ method: "POST" })
         const awayPos = a?.position ?? 0;
         const stakes = h && a ? computeStakes(homePos, awayPos, total) : [];
 
+        const homeThreshold = h && standings
+          ? computeThreshold(h.position, h.points, standings.pointsByRank, standings.total)
+          : undefined;
+        const awayThreshold = a && standings
+          ? computeThreshold(a.position, a.points, standings.pointsByRank, standings.total)
+          : undefined;
+
         const homeTeam = {
           name: fx.teams.home.name,
           short: shortName(fx.teams.home.name),
           position: homePos,
           points: h?.points ?? 0,
           color: colorFor(fx.teams.home.name),
+          threshold: homeThreshold,
         };
         const awayTeam = {
           name: fx.teams.away.name,
@@ -327,6 +409,7 @@ export const getLiveMatches = createServerFn({ method: "POST" })
           position: awayPos,
           points: a?.points ?? 0,
           color: colorFor(fx.teams.away.name),
+          threshold: awayThreshold,
         };
 
         matches.push({

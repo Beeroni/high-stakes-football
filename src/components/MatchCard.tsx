@@ -67,6 +67,19 @@ export function MatchCard({ match }: { match: Match }) {
 
 function TeamRow({ team, align }: { team: Match["home"]; align: "left" | "right" }) {
   const isRight = align === "right";
+  const t = team.threshold;
+  const thresholdClass =
+    t?.kind === "relegation"
+      ? t.delta < 0
+        ? "text-destructive"
+        : "text-amber-500"
+      : t?.kind === "title"
+        ? "text-primary"
+        : t?.kind === "continental"
+          ? t.delta < 0
+            ? "text-amber-500"
+            : "text-emerald-500"
+          : "text-muted-foreground";
   return (
     <div className={`flex items-center gap-3 ${isRight ? "flex-row-reverse text-right" : ""}`}>
       <TeamCrest short={team.short} color={team.color} />
@@ -74,10 +87,15 @@ function TeamRow({ team, align }: { team: Match["home"]; align: "left" | "right"
         <div className="font-display text-base font-semibold leading-tight">{team.name}</div>
         <div className="mt-0.5 text-xs text-muted-foreground">
           <span className="rounded bg-muted px-1.5 py-0.5 font-mono tabular-nums">
-            {ordinal(team.position)}
+            {team.position > 0 ? ordinal(team.position) : "—"}
           </span>
           <span className="ml-1.5 opacity-70">{team.points} pts</span>
         </div>
+        {t && (
+          <div className={`mt-1 text-[11px] font-semibold tabular-nums ${thresholdClass}`}>
+            {t.label}
+          </div>
+        )}
       </div>
     </div>
   );

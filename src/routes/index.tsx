@@ -1,6 +1,6 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { useMemo, useRef, useState } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMemo, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { useServerFn } from "@tanstack/react-start";
 import { LEAGUES } from "@/data/leagues";
 import { type Match } from "@/data/matches";
@@ -51,22 +51,30 @@ function Dashboard() {
   );
 
   const fetchLive = useServerFn(getLiveMatches);
-  const queryClient = useQueryClient();
+  const [refreshCooldownUntil, setRefreshCooldownUntil] = useState(0);
   const liveQuery = useQuery({
     queryKey: ["live-matches", leagueIdsKey],
     queryFn: () => fetchLive({ data: { leagueIds: leagueIdsKey.split(",").filter(Boolean) } }),
     enabled: leagueIdsKey.length > 0,
-    staleTime: 5 * 60 * 1000, // 5min client cache, matches server cache
-    refetchInterval: 5 * 60 * 1000,
+    staleTime: 5 * 60 * 1000,
+    // Pause auto-refetch when the server returned an error payload (e.g. 403/quota).
+    refetchInterval: (q) => {
+      const d = q.state.data as { error?: string | null } | undefined;
+      return d?.error ? false : 5 * 60 * 1000;
+    },
     refetchOnWindowFocus: false,
+    retry: false, // never auto-retry — burns API quota
   });
 
-  const lastRefreshRef = useRef(0);
+  const apiError = liveQuery.data?.error ?? (liveQuery.error instanceof Error ? liveQuery.error.message : null);
+  const now = Date.now();
+  const cooldownRemaining = Math.max(0, Math.ceil((refreshCooldownUntil - now) / 1000));
+  const refreshDisabled = liveQuery.isFetching || cooldownRemaining > 0;
+
   const handleRefresh = () => {
-    const now = Date.now();
-    if (now - lastRefreshRef.current < 30_000) return; // throttle to 1/30s
-    lastRefreshRef.current = now;
-    queryClient.invalidateQueries({ queryKey: ["live-matches"] });
+    if (refreshDisabled) return;
+    setRefreshCooldownUntil(Date.now() + 30_000);
+    liveQuery.refetch();
   };
 
   const byLeague = useMemo<Match[]>(() => {
@@ -136,16 +144,20 @@ function Dashboard() {
           <div className="flex items-center gap-2 text-xs">
             <button
               onClick={handleRefresh}
-              disabled={liveQuery.isFetching}
+              disabled={refreshDisabled}
+              title={apiError ?? undefined}
               className="flex items-center gap-1.5 rounded-full bg-secondary px-2.5 py-1 font-semibold text-secondary-foreground transition-colors hover:bg-secondary/80 disabled:opacity-50"
             >
-              <RefreshCw className={liveQuery.isFetching ? "h-3 w-3 animate-spin" : "h-3 w-3"} />
-              Refresh
+              <RefreshCw className={`h-3 w-3 ${liveQuery.isFetching ? "animate-spin" : ""}`} />
+              {liveQuery.isFetching
+                ? "Refreshing"
+                : cooldownRemaining > 0
+                  ? `Wait ${cooldownRemaining}s`
+                  : "Refresh"}
             </button>
-            {liveQuery.isFetching && (
-              <span className="flex items-center gap-1.5 rounded-full bg-secondary px-2.5 py-1 font-semibold text-secondary-foreground">
-                <RefreshCw className="h-3 w-3 animate-spin" />
-                Syncing
+            {apiError && (
+              <span className="flex items-center gap-1.5 rounded-full bg-destructive/15 px-2.5 py-1 font-bold uppercase tracking-wider text-destructive" title={apiError}>
+                API error
               </span>
             )}
             {liveCount > 0 && (
@@ -183,13 +195,13 @@ function Dashboard() {
           {filtered.length === 0 ? (
             <div className="rounded-xl border border-dashed border-border bg-card/40 px-6 py-16 text-center">
               <p className="font-display text-lg font-semibold">
-                No matches currently past the 65th minute
+                {apiError ? "Live data unavailable" : "No matches currently past the 65th minute"}
               </p>
               <p className="mt-1 text-sm text-muted-foreground">
                 {liveQuery.isFetching
                   ? "Checking live fixtures…"
-                  : liveQuery.data?.error
-                    ? liveQuery.data.error
+                  : apiError
+                    ? apiError
                     : "Check back closer to full-time for in-play matches with settled odds."}
               </p>
             </div>
