@@ -195,13 +195,13 @@ function Dashboard() {
           {filtered.length === 0 ? (
             <div className="rounded-xl border border-dashed border-border bg-card/40 px-6 py-16 text-center">
               <p className="font-display text-lg font-semibold">
-                No matches currently past the 65th minute
+                {apiError ? "Live data unavailable" : "No matches currently past the 65th minute"}
               </p>
               <p className="mt-1 text-sm text-muted-foreground">
                 {liveQuery.isFetching
                   ? "Checking live fixtures…"
-                  : liveQuery.data?.error
-                    ? liveQuery.data.error
+                  : apiError
+                    ? apiError
                     : "Check back closer to full-time for in-play matches with settled odds."}
               </p>
             </div>
