@@ -1,46 +1,31 @@
-## Goal
+## Plan
 
-Show only **in-play matches past the 65th minute** (the betting-relevant window), and use that constraint to slash API usage so we never hit the throttle.
+1. Add exact threshold data to each live match
+   - Extend the match DTO with a small `thresholds` section for each team.
+   - Compute points gaps from the fetched standings:
+     - Relegation: gap to safety / cushion above danger.
+     - Europe: gap to the configured continental cutoff.
+     - Title: gap to 1st / lead over 2nd when relevant.
+   - Keep the existing stake labels, but make the explainer more precise using these gaps.
 
-## Why this saves requests
+2. Show the threshold in the match card mini-table
+   - Under each team’s position/points line, add a compact line such as `+2 above safety`, `-3 from Europe`, or `+1 UCL cushion`.
+   - Only show it when standings are available; otherwise avoid fake `0 pts` threshold text.
+   - Keep the card layout responsive and avoid adding another API call.
 
-Today we loop 25 leagues × 2 endpoints (standings + fixtures) = ~50 calls per cold load. The API-Football `/fixtures?live=all` endpoint returns **every live match in the world in a single call**. Filtering client-side to `minute >= 65` means most polls cost just 1 request, and we only pull standings for the handful of leagues that actually have a qualifying live match.
+3. Fix refresh button behavior so it does not keep spinning or hammer the API
+   - Stop showing spinner for background polling unless a real request is actively in flight.
+   - Make manual refresh use `refetch()` instead of invalidating broad queries.
+   - Disable manual refresh for 30 seconds after a click and show a clear cooldown label instead of spinning indefinitely.
+   - Disable automatic retry on API errors so 403/429 failures do not repeatedly retry and burn quota.
 
-## Approach
-
-Rewrite `src/lib/football.functions.ts` around a live-first strategy:
-
-1. **One call for live data**: `GET /fixtures?live=all` → returns all in-play fixtures across all leagues. Filter to `fixture.status.elapsed >= 65` and `status.short in ['2H','ET','BT','P','LIVE']` (exclude HT and finished).
-2. **Filter by configured leagues**: keep only fixtures whose `league.id` is in our `LEAGUE_MAP` (the 25 leagues we support).
-3. **Lazy standings**: for each league that has ≥1 qualifying live match, fetch its standings (cached 12h per league as today). Leagues with no qualifying live matches cost 0 extra calls.
-4. **Short cache for the live call**: 60s server-side cache on `/fixtures?live=all` (a match's minute only advances every minute anyway). Client `staleTime` stays at 60s.
-5. **Hard request budget**: keep the existing throttle queue, but tighten daily budget tracking — abort early if today's used calls > 90.
-
-## Request math
-
-- Worst case during peak European Saturday (say 10 leagues with qualifying matches): 1 (live) + 10 (standings, cached 12h) = 11 calls, then 1 call/min for live refresh.
-- Off-peak: 1 call/min, standings already cached.
-- Daily ceiling with 60s polling for 8 active hours = ~480 polls → **way over 100/day**.
-
-**Adjustment**: bump the live-fixtures cache to **5 minutes** server-side (minute precision is fine for "is this past 65'?"). That's ~12 calls/hour × ~8 active hours = ~96 calls + standings = still tight. So:
-- Live endpoint cached **5 min** server-side.
-- Manual "Refresh" button bypasses cache (capped to once per 30s client-side).
-- Standings cached **24h** (positions change rarely mid-day).
-
-## UI changes
-
-- `src/routes/index.tsx`: empty state copy → "No matches currently past the 65th minute. Check back closer to full-time."
-- Drop the league-by-league fallback to mock data (mock matches don't have a live minute, so they'd never qualify). Show only real qualifying live matches; if none, show empty state.
-- Keep the Refresh button; rate-limit it to one click per 30s.
-
-## Out of scope
-
-- No schema changes to `Match`.
-- No changes to standings rendering, stake computation, or card UI.
-- Mock data file stays for design-time use but isn't merged into the live list anymore.
+4. Make 403 Forbidden safe and understandable
+   - Treat 403 as a hard configuration/quota/auth error, not a retryable live-data miss.
+   - Return a user-friendly message explaining the RapidAPI Football key/plan needs checking.
+   - Pause further automatic refetching while that 403 error is present, preventing more requests until the user manually tries again after fixing the key/plan.
 
 ## Technical notes
 
-- API-Football live status codes treated as "in play": `1H, HT, 2H, ET, BT, P, LIVE`. We filter to `elapsed >= 65` AND `short != 'HT'`.
-- `elapsed` from the API is the displayed minute (includes injury time as 45+x / 90+x via `extra`).
-- Throttle queue + 429 cooldown stay in place as a safety net.
+- No new endpoint calls are needed for the mini-table: standings are already fetched only for leagues with qualifying live matches.
+- The current spinner is tied to React Query `isFetching`, so it can spin during automatic refetches and repeated error attempts. The fix separates manual refresh UI from background fetch state and turns off retries.
+- The current `API-Football 403 Forbidden` means the RapidAPI subscription/key/endpoint access is being rejected. Code can prevent repeated calls and show a clearer message, but the key or RapidAPI plan still needs to be valid for real data to load.
