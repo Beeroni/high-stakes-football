@@ -373,7 +373,7 @@ export const getLiveMatches = createServerFn({ method: "POST" })
 
     const matches: Match[] = [];
     for (const [leagueId, fixtures] of byLeague) {
-      let standings: { lookup: Map<number, { position: number; points: number }>; total: number } | null = null;
+      let standings: Awaited<ReturnType<typeof fetchStandings>> = null;
       try {
         standings = await fetchStandings(leagueId);
       } catch (err) {
@@ -388,12 +388,20 @@ export const getLiveMatches = createServerFn({ method: "POST" })
         const awayPos = a?.position ?? 0;
         const stakes = h && a ? computeStakes(homePos, awayPos, total) : [];
 
+        const homeThreshold = h && standings
+          ? computeThreshold(h.position, h.points, standings.pointsByRank, standings.total)
+          : undefined;
+        const awayThreshold = a && standings
+          ? computeThreshold(a.position, a.points, standings.pointsByRank, standings.total)
+          : undefined;
+
         const homeTeam = {
           name: fx.teams.home.name,
           short: shortName(fx.teams.home.name),
           position: homePos,
           points: h?.points ?? 0,
           color: colorFor(fx.teams.home.name),
+          threshold: homeThreshold,
         };
         const awayTeam = {
           name: fx.teams.away.name,
@@ -401,6 +409,7 @@ export const getLiveMatches = createServerFn({ method: "POST" })
           position: awayPos,
           points: a?.points ?? 0,
           color: colorFor(fx.teams.away.name),
+          threshold: awayThreshold,
         };
 
         matches.push({
