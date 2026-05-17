@@ -239,6 +239,64 @@ function buildExplainer(
   return parts.join(" ");
 }
 
+// Continental cutoff = top 4; relegation cutoff = bottom 3 (rank > total - 3).
+const CONTINENTAL_CUTOFF = 4;
+const RELEGATION_SIZE = 3;
+
+function computeThreshold(
+  position: number,
+  points: number,
+  pointsByRank: number[],
+  total: number,
+): Threshold {
+  const relegationLine = total - RELEGATION_SIZE; // last safe rank
+  // Title context
+  if (position === 1) {
+    const second = pointsByRank[1] ?? points;
+    const lead = points - second;
+    return { label: lead > 0 ? `+${lead} lead at top` : "Tied at top", delta: lead, kind: "title" };
+  }
+  if (position === 2) {
+    const first = pointsByRank[0] ?? points;
+    const gap = points - first; // negative
+    return { label: `${gap} to title`, delta: gap, kind: "title" };
+  }
+  // Relegation zone or fighting near it
+  if (position > relegationLine) {
+    // In drop zone — gap to safety (negative)
+    const safety = pointsByRank[relegationLine - 1] ?? points;
+    const gap = points - safety;
+    return { label: `${gap} to safety`, delta: gap, kind: "relegation" };
+  }
+  if (position >= relegationLine - 1) {
+    // Just above the line — cushion above first drop spot
+    const firstDrop = pointsByRank[relegationLine] ?? points;
+    const cushion = points - firstDrop;
+    return {
+      label: cushion > 0 ? `+${cushion} above drop` : "On the drop line",
+      delta: cushion,
+      kind: "relegation",
+    };
+  }
+  // Continental window
+  if (position <= CONTINENTAL_CUTOFF) {
+    const firstOut = pointsByRank[CONTINENTAL_CUTOFF] ?? points;
+    const cushion = points - firstOut;
+    return {
+      label: cushion > 0 ? `+${cushion} UCL cushion` : "On the UCL line",
+      delta: cushion,
+      kind: "continental",
+    };
+  }
+  if (position <= CONTINENTAL_CUTOFF + 3) {
+    const lastIn = pointsByRank[CONTINENTAL_CUTOFF - 1] ?? points;
+    const gap = points - lastIn; // negative
+    return { label: `${gap} from Europe`, delta: gap, kind: "continental" };
+  }
+  // Mid-table
+  return { label: "Mid-table", delta: 0, kind: "neutral" };
+}
+
 // In-play status codes where `elapsed` reflects real match minute (excludes HT).
 const IN_PLAY = new Set(["2H", "ET", "BT", "P", "LIVE"]);
 const MIN_MINUTE = 65;
