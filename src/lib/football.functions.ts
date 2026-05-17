@@ -144,6 +144,14 @@ async function apiFootball<T = unknown>(
       getQueue().cooldownUntil = Date.now() + COOLDOWN_MS;
       throw new Error("API-Football 429 Too Many Requests (rate-limited, cooling down)");
     }
+    if (res.status === 401 || res.status === 403) {
+      // Hard auth/plan error — stop hammering for the rest of the day.
+      const q = getQueue();
+      q.cooldownUntil = Date.now() + 24 * 60 * 60 * 1000;
+      throw new Error(
+        `API-Football ${res.status} — your RapidAPI key or plan is being rejected. Check the RAPIDAPI_FOOTBALL_KEY value and that your RapidAPI subscription has access to api-football-v1.`,
+      );
+    }
     if (!res.ok) throw new Error(`API-Football ${res.status} ${res.statusText}`);
     const json = (await res.json()) as { response: T; errors?: unknown };
     return json.response;
