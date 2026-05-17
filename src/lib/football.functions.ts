@@ -1,6 +1,6 @@
 import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
-import type { Match } from "@/data/matches";
+import type { Match, Threshold } from "@/data/matches";
 import type { StakeType } from "@/data/leagues";
 
 // Map our internal league IDs to API-Football's IDs + the current season.
