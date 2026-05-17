@@ -51,22 +51,30 @@ function Dashboard() {
   );
 
   const fetchLive = useServerFn(getLiveMatches);
-  const queryClient = useQueryClient();
+  const [refreshCooldownUntil, setRefreshCooldownUntil] = useState(0);
   const liveQuery = useQuery({
     queryKey: ["live-matches", leagueIdsKey],
     queryFn: () => fetchLive({ data: { leagueIds: leagueIdsKey.split(",").filter(Boolean) } }),
     enabled: leagueIdsKey.length > 0,
-    staleTime: 5 * 60 * 1000, // 5min client cache, matches server cache
-    refetchInterval: 5 * 60 * 1000,
+    staleTime: 5 * 60 * 1000,
+    // Pause auto-refetch when the server returned an error payload (e.g. 403/quota).
+    refetchInterval: (q) => {
+      const d = q.state.data as { error?: string | null } | undefined;
+      return d?.error ? false : 5 * 60 * 1000;
+    },
     refetchOnWindowFocus: false,
+    retry: false, // never auto-retry — burns API quota
   });
 
-  const lastRefreshRef = useRef(0);
+  const apiError = liveQuery.data?.error ?? (liveQuery.error instanceof Error ? liveQuery.error.message : null);
+  const now = Date.now();
+  const cooldownRemaining = Math.max(0, Math.ceil((refreshCooldownUntil - now) / 1000));
+  const refreshDisabled = liveQuery.isFetching || cooldownRemaining > 0;
+
   const handleRefresh = () => {
-    const now = Date.now();
-    if (now - lastRefreshRef.current < 30_000) return; // throttle to 1/30s
-    lastRefreshRef.current = now;
-    queryClient.invalidateQueries({ queryKey: ["live-matches"] });
+    if (refreshDisabled) return;
+    setRefreshCooldownUntil(Date.now() + 30_000);
+    liveQuery.refetch();
   };
 
   const byLeague = useMemo<Match[]>(() => {
