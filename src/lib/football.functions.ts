@@ -245,7 +245,11 @@ const MIN_MINUTE = 65;
 
 async function fetchStandings(
   leagueId: string,
-): Promise<{ lookup: Map<number, { position: number; points: number }>; total: number } | null> {
+): Promise<{
+  lookup: Map<number, { position: number; points: number }>;
+  pointsByRank: number[]; // index 0 = rank 1
+  total: number;
+} | null> {
   const cfg = API_LEAGUE[leagueId];
   if (!cfg) return null;
   return cached(`standings:${leagueId}:${cfg.season}`, STANDINGS_TTL_MS, async () => {
@@ -255,8 +259,12 @@ async function fetchStandings(
     });
     const table = standings[0]?.league.standings[0] ?? [];
     const lookup = new Map<number, { position: number; points: number }>();
-    for (const row of table) lookup.set(row.team.id, { position: row.rank, points: row.points });
-    return { lookup, total: table.length };
+    const pointsByRank: number[] = [];
+    for (const row of table) {
+      lookup.set(row.team.id, { position: row.rank, points: row.points });
+      pointsByRank[row.rank - 1] = row.points;
+    }
+    return { lookup, pointsByRank, total: table.length };
   });
 }
 
