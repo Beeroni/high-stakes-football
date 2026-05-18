@@ -1,31 +1,62 @@
-## Plan
+## Goal
 
-1. Add exact threshold data to each live match
-   - Extend the match DTO with a small `thresholds` section for each team.
-   - Compute points gaps from the fetched standings:
-     - Relegation: gap to safety / cushion above danger.
-     - Europe: gap to the configured continental cutoff.
-     - Title: gap to 1st / lead over 2nd when relevant.
-   - Keep the existing stake labels, but make the explainer more precise using these gaps.
+Swap the live data source from RapidAPI's API-Football to direct `api.sofascore.com` endpoints, and cut request volume by skipping any league that (a) has no fixture scheduled today, AND (b) is not in its final stretch of the season.
 
-2. Show the threshold in the match card mini-table
-   - Under each team’s position/points line, add a compact line such as `+2 above safety`, `-3 from Europe`, or `+1 UCL cushion`.
-   - Only show it when standings are available; otherwise avoid fake `0 pts` threshold text.
-   - Keep the card layout responsive and avoid adding another API call.
+## What changes
 
-3. Fix refresh button behavior so it does not keep spinning or hammer the API
-   - Stop showing spinner for background polling unless a real request is actively in flight.
-   - Make manual refresh use `refetch()` instead of invalidating broad queries.
-   - Disable manual refresh for 30 seconds after a click and show a clear cooldown label instead of spinning indefinitely.
-   - Disable automatic retry on API errors so 403/429 failures do not repeatedly retry and burn quota.
+### 1. New SofaScore client (`src/lib/football.functions.ts`, full rewrite of the fetch layer)
 
-4. Make 403 Forbidden safe and understandable
-   - Treat 403 as a hard configuration/quota/auth error, not a retryable live-data miss.
-   - Return a user-friendly message explaining the RapidAPI Football key/plan needs checking.
-   - Pause further automatic refetching while that 403 error is present, preventing more requests until the user manually tries again after fixing the key/plan.
+- Drop `RAPIDAPI_FOOTBALL_KEY` and all `api-football-v1.p.rapidapi.com` calls.
+- New base: `https://api.sofascore.com/api/v1/...` with browser-like headers (`User-Agent`, `Accept: application/json`, `Origin: https://www.sofascore.com`, `Referer: https://www.sofascore.com/`) — required or Cloudflare returns 403.
+- Keep the existing throttled queue (`MIN_GAP_MS`, `COOLDOWN_MS`, `DAILY_BUDGET`) and per-isolate cache, retuned for SofaScore's looser limits (raise `DAILY_BUDGET` to ~500, lower `MIN_GAP_MS` to ~2s). 429 → cooldown 60s, 403 → cooldown 24h with a clear "SofaScore is blocking this IP" error.
+- Endpoints used:
+  - `sport/football/scheduled-events/{YYYY-MM-DD}` — one call/day, cached 6h. Source of today's fixtures.
+  - `unique-tournament/{id}/season/{seasonId}/events/last/0` and `.../events/next/0` — used once per league per day to determine total rounds + current round (drives "final stretch" detection). Cached 24h.
+  - `unique-tournament/{id}/season/{seasonId}/standings/total` — standings table. Cached 24h.
+  - `sport/football/events/live` — live fixtures, cached 5min, replaces `fixtures?live=all`.
 
-## Technical notes
+### 2. League ID map
 
-- No new endpoint calls are needed for the mini-table: standings are already fetched only for leagues with qualifying live matches.
-- The current spinner is tied to React Query `isFetching`, so it can spin during automatic refetches and repeated error attempts. The fix separates manual refresh UI from background fetch state and turns off retries.
-- The current `API-Football 403 Forbidden` means the RapidAPI subscription/key/endpoint access is being rejected. Code can prevent repeated calls and show a clearer message, but the key or RapidAPI plan still needs to be valid for real data to load.
+- Replace `API_LEAGUE` with `SOFA_LEAGUE`: `{ tournamentId, seasonId }` per internal league id. Populated once from SofaScore's `unique-tournament/{slug}` lookup (hardcoded based on current season, same approach we already use). Same 25 leagues.
+
+### 3. "Final fixtures" gating (the request-saving rule)
+
+A league is **eligible to poll** today only if EITHER:
+- **Has a fixture today**: appears in today's `scheduled-events` payload, OR
+- **In final stretch**: `currentRound >= totalRounds - 4` (last 5 matchdays).
+
+Implementation:
+- `getEligibleLeagues()` runs once per request, returns the intersection of user-selected leagues and the eligibility set.
+- Live fixtures are filtered to eligible leagues only.
+- Standings are fetched only for eligible leagues that also have a qualifying live match (already past 65').
+- A league that fails the gate contributes zero API calls that day.
+
+### 4. Live filter rules (unchanged)
+
+- `minute >= 65`
+- in-play statuses (`status.type === "inprogress"` + SofaScore's `status.code` in the 2H/ET set)
+- league in eligible set
+
+### 5. Match DTO + threshold logic
+
+- Unchanged. `computeStakes`, `computeThreshold`, `buildLabel`, `buildExplainer` keep working — just fed from SofaScore standings rows (`team.id`, `position`, `points`, `pointsByRank`).
+
+### 6. UI (`src/routes/index.tsx`, `src/components/MatchCard.tsx`)
+
+- No visible changes. Error strings updated: "API-Football" → "SofaScore". The 403 hint changes to "SofaScore is blocking requests from this server — try again later".
+
+### 7. Secrets
+
+- No new secret required (direct SofaScore endpoints don't need a key).
+- `RAPIDAPI_FOOTBALL_KEY` is left in place but unused; safe to delete from project secrets after this lands.
+
+## Risk notes (plain)
+
+- SofaScore has no public API and may block server IPs at any time. If 403s start happening from the Cloudflare Worker, the cooldown will kick in and the page will show the new "blocking" message; the fix at that point is either to use a proxy or move to a paid provider. I'll add a clear error so this is obvious instead of silent.
+- The "final stretch" check needs `currentRound` + `totalRounds`. SofaScore provides both on each season object; if a league doesn't expose rounds (cup-style), it falls back to "must have fixture today" only.
+
+## Out of scope
+
+- No UI redesign.
+- No changes to threshold math, refresh button behavior, or auto-refetch intervals.
+- No new secrets, no Supabase changes.
