@@ -233,13 +233,57 @@ function ordinal(n: number): string {
   return n + (s[(v - 20) % 10] || s[v] || s[0]);
 }
 
-function computeStakes(homePos: number, awayPos: number, total: number): StakeType[] {
+const CONTINENTAL_CUTOFF = 4;
+const RELEGATION_SIZE = 3;
+
+// Max points a team can still earn with `remainingRounds` matches left.
+function maxGain(remainingRounds: number): number {
+  return Math.max(0, remainingRounds) * 3;
+}
+
+type Contention = { title: boolean; continental: boolean; relegation: boolean };
+
+// A team is in contention for a stake only when remaining fixtures can still
+// change their position relative to the threshold line.
+function teamContention(
+  position: number,
+  points: number,
+  pointsByRank: number[],
+  total: number,
+  remainingRounds: number,
+): Contention {
+  const gain = maxGain(remainingRounds);
+  const leader = pointsByRank[0] ?? points;
+  const second = pointsByRank[1] ?? points;
+  const ucl = pointsByRank[CONTINENTAL_CUTOFF - 1] ?? points;
+  const firstOutUcl = pointsByRank[CONTINENTAL_CUTOFF] ?? points;
+  const relegationLine = total - RELEGATION_SIZE;
+  const safety = pointsByRank[relegationLine - 1] ?? points;
+  const firstDrop = pointsByRank[relegationLine] ?? points;
+
+  const title =
+    position === 1
+      ? leader - second <= gain // chasers can still catch
+      : points + gain >= leader; // chaser can reach leader
+
+  const continental =
+    position <= CONTINENTAL_CUTOFF
+      ? points - firstOutUcl <= gain
+      : points + gain >= ucl;
+
+  const relegation =
+    position > relegationLine
+      ? points + gain >= safety
+      : points - firstDrop <= gain;
+
+  return { title, continental, relegation };
+}
+
+function computeStakes(homeCon: Contention, awayCon: Contention): StakeType[] {
   const out = new Set<StakeType>();
-  for (const pos of [homePos, awayPos]) {
-    if (pos <= 2) out.add("title");
-    if (pos >= 3 && pos <= 6) out.add("continental");
-    if (pos >= total - 2) out.add("relegation");
-  }
+  if (homeCon.title || awayCon.title) out.add("title");
+  if (homeCon.continental || awayCon.continental) out.add("continental");
+  if (homeCon.relegation || awayCon.relegation) out.add("relegation");
   return [...out];
 }
 
@@ -255,11 +299,17 @@ function buildExplainer(
   away: { name: string; position: number; points: number },
   total: number,
   stakes: StakeType[],
+  remainingRounds: number,
 ): string {
   const parts: string[] = [];
   parts.push(
     `${home.name} (${ordinal(home.position)}, ${home.points} pts) vs ${away.name} (${ordinal(away.position)}, ${away.points} pts).`,
   );
+  if (remainingRounds > 0) {
+    parts.push(
+      `${remainingRounds} match${remainingRounds === 1 ? "" : "es"} left — up to ${maxGain(remainingRounds)} pts in play.`,
+    );
+  }
   if (stakes.includes("title")) parts.push("Three points here could swing the title race.");
   if (stakes.includes("relegation")) {
     const dangerTeam =
@@ -271,9 +321,6 @@ function buildExplainer(
   }
   return parts.join(" ");
 }
-
-const CONTINENTAL_CUTOFF = 4;
-const RELEGATION_SIZE = 3;
 
 function computeThreshold(
   position: number,
