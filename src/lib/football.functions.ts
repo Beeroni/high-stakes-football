@@ -233,13 +233,57 @@ function ordinal(n: number): string {
   return n + (s[(v - 20) % 10] || s[v] || s[0]);
 }
 
-function computeStakes(homePos: number, awayPos: number, total: number): StakeType[] {
+const CONTINENTAL_CUTOFF = 4;
+const RELEGATION_SIZE = 3;
+
+// Max points a team can still earn with `remainingRounds` matches left.
+function maxGain(remainingRounds: number): number {
+  return Math.max(0, remainingRounds) * 3;
+}
+
+type Contention = { title: boolean; continental: boolean; relegation: boolean };
+
+// A team is in contention for a stake only when remaining fixtures can still
+// change their position relative to the threshold line.
+function teamContention(
+  position: number,
+  points: number,
+  pointsByRank: number[],
+  total: number,
+  remainingRounds: number,
+): Contention {
+  const gain = maxGain(remainingRounds);
+  const leader = pointsByRank[0] ?? points;
+  const second = pointsByRank[1] ?? points;
+  const ucl = pointsByRank[CONTINENTAL_CUTOFF - 1] ?? points;
+  const firstOutUcl = pointsByRank[CONTINENTAL_CUTOFF] ?? points;
+  const relegationLine = total - RELEGATION_SIZE;
+  const safety = pointsByRank[relegationLine - 1] ?? points;
+  const firstDrop = pointsByRank[relegationLine] ?? points;
+
+  const title =
+    position === 1
+      ? leader - second <= gain // chasers can still catch
+      : points + gain >= leader; // chaser can reach leader
+
+  const continental =
+    position <= CONTINENTAL_CUTOFF
+      ? points - firstOutUcl <= gain
+      : points + gain >= ucl;
+
+  const relegation =
+    position > relegationLine
+      ? points + gain >= safety
+      : points - firstDrop <= gain;
+
+  return { title, continental, relegation };
+}
+
+function computeStakes(homeCon: Contention, awayCon: Contention): StakeType[] {
   const out = new Set<StakeType>();
-  for (const pos of [homePos, awayPos]) {
-    if (pos <= 2) out.add("title");
-    if (pos >= 3 && pos <= 6) out.add("continental");
-    if (pos >= total - 2) out.add("relegation");
-  }
+  if (homeCon.title || awayCon.title) out.add("title");
+  if (homeCon.continental || awayCon.continental) out.add("continental");
+  if (homeCon.relegation || awayCon.relegation) out.add("relegation");
   return [...out];
 }
 
@@ -255,11 +299,17 @@ function buildExplainer(
   away: { name: string; position: number; points: number },
   total: number,
   stakes: StakeType[],
+  remainingRounds: number,
 ): string {
   const parts: string[] = [];
   parts.push(
     `${home.name} (${ordinal(home.position)}, ${home.points} pts) vs ${away.name} (${ordinal(away.position)}, ${away.points} pts).`,
   );
+  if (remainingRounds > 0) {
+    parts.push(
+      `${remainingRounds} match${remainingRounds === 1 ? "" : "es"} left — up to ${maxGain(remainingRounds)} pts in play.`,
+    );
+  }
   if (stakes.includes("title")) parts.push("Three points here could swing the title race.");
   if (stakes.includes("relegation")) {
     const dangerTeam =
@@ -271,9 +321,6 @@ function buildExplainer(
   }
   return parts.join(" ");
 }
-
-const CONTINENTAL_CUTOFF = 4;
-const RELEGATION_SIZE = 3;
 
 function computeThreshold(
   position: number,
@@ -513,13 +560,32 @@ export const getLiveMatches = createServerFn({ method: "POST" })
         console.error(`[football] standings ${leagueId} failed:`, err);
       }
 
+      // Matches each team can still play (incl. current round).
+      const remainingRounds =
+        meta.totalRounds != null && meta.currentRound != null
+          ? Math.max(0, meta.totalRounds - meta.currentRound + 1)
+          : FINAL_STRETCH_ROUNDS;
+
       for (const ev of events) {
         const h = standings?.lookup.get(ev.homeTeam.id);
         const a = standings?.lookup.get(ev.awayTeam.id);
         const total = standings?.total ?? 20;
         const homePos = h?.position ?? 0;
         const awayPos = a?.position ?? 0;
-        const stakes = h && a ? computeStakes(homePos, awayPos, total) : [];
+
+        const homeCon =
+          h && standings
+            ? teamContention(h.position, h.points, standings.pointsByRank, standings.total, remainingRounds)
+            : { title: false, continental: false, relegation: false };
+        const awayCon =
+          a && standings
+            ? teamContention(a.position, a.points, standings.pointsByRank, standings.total, remainingRounds)
+            : { title: false, continental: false, relegation: false };
+
+        const stakes = h && a ? computeStakes(homeCon, awayCon) : [];
+
+        // Skip matches where neither team is mathematically in any race.
+        if (stakes.length === 0) continue;
 
         const homeThreshold =
           h && standings
@@ -561,11 +627,27 @@ export const getLiveMatches = createServerFn({ method: "POST" })
           stakesLabel: buildLabel(stakes),
           stakesExplainer:
             h && a
-              ? buildExplainer(homeTeam, awayTeam, total, stakes)
+              ? buildExplainer(homeTeam, awayTeam, total, stakes, remainingRounds)
               : `${ev.homeTeam.name} vs ${ev.awayTeam.name} — live past the 65th minute.`,
         });
       }
     }
+
+    // Rank: matches where teams have better chances (smaller absolute gap to
+    // their threshold) come first. Title-race ties break ahead of others.
+    const stakeWeight = (s: StakeType[]): number =>
+      s.includes("title") ? 0 : s.includes("relegation") ? 1 : 2;
+    const chance = (m: Match): number => {
+      const deltas: number[] = [];
+      if (m.home.threshold) deltas.push(Math.abs(m.home.threshold.delta));
+      if (m.away.threshold) deltas.push(Math.abs(m.away.threshold.delta));
+      return deltas.length ? Math.min(...deltas) : 99;
+    };
+    matches.sort((a, b) => {
+      const sw = stakeWeight(a.stakes) - stakeWeight(b.stakes);
+      if (sw !== 0) return sw;
+      return chance(a) - chance(b);
+    });
 
     return { matches, error: null as string | null, budget: getQueue().dayCount };
   });
