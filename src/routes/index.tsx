@@ -1,14 +1,11 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useMemo, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
-import { useServerFn } from "@tanstack/react-start";
 import { LEAGUES } from "@/data/leagues";
-import { type Match } from "@/data/matches";
+import { MATCHES } from "@/data/matches";
 import { LeagueSidebar } from "@/components/LeagueSidebar";
 import { StakeFilter, type StakeFilterValue } from "@/components/StakeFilter";
 import { MatchCard } from "@/components/MatchCard";
-import { getLiveMatches } from "@/lib/football.functions";
-import { Flame, Search, RefreshCw } from "lucide-react";
+import { Flame, Search } from "lucide-react";
 
 export const Route = createFileRoute("/")({
   head: () => ({
@@ -45,41 +42,10 @@ function Dashboard() {
     });
   };
 
-  const leagueIdsKey = useMemo(
-    () => [...selectedLeagues].sort().join(","),
+  const byLeague = useMemo(
+    () => MATCHES.filter((m) => selectedLeagues.has(m.leagueId)),
     [selectedLeagues],
   );
-
-  const fetchLive = useServerFn(getLiveMatches);
-  const [refreshCooldownUntil, setRefreshCooldownUntil] = useState(0);
-  const liveQuery = useQuery({
-    queryKey: ["live-matches", leagueIdsKey],
-    queryFn: () => fetchLive({ data: { leagueIds: leagueIdsKey.split(",").filter(Boolean) } }),
-    enabled: leagueIdsKey.length > 0,
-    staleTime: 5 * 60 * 1000,
-    // Pause auto-refetch when the server returned an error payload (e.g. 403/quota).
-    refetchInterval: (q) => {
-      const d = q.state.data as { error?: string | null } | undefined;
-      return d?.error ? false : 5 * 60 * 1000;
-    },
-    refetchOnWindowFocus: false,
-    retry: false, // never auto-retry — burns API quota
-  });
-
-  const apiError = liveQuery.data?.error ?? (liveQuery.error instanceof Error ? liveQuery.error.message : null);
-  const now = Date.now();
-  const cooldownRemaining = Math.max(0, Math.ceil((refreshCooldownUntil - now) / 1000));
-  const refreshDisabled = liveQuery.isFetching || cooldownRemaining > 0;
-
-  const handleRefresh = () => {
-    if (refreshDisabled) return;
-    setRefreshCooldownUntil(Date.now() + 30_000);
-    liveQuery.refetch();
-  };
-
-  const byLeague = useMemo<Match[]>(() => {
-    return liveQuery.data?.matches ?? [];
-  }, [liveQuery.data]);
 
   const counts = useMemo(() => {
     const c = { all: byLeague.length, relegation: 0, title: 0, continental: 0 };
@@ -142,24 +108,6 @@ function Dashboard() {
           </div>
 
           <div className="flex items-center gap-2 text-xs">
-            <button
-              onClick={handleRefresh}
-              disabled={refreshDisabled}
-              title={apiError ?? undefined}
-              className="flex items-center gap-1.5 rounded-full bg-secondary px-2.5 py-1 font-semibold text-secondary-foreground transition-colors hover:bg-secondary/80 disabled:opacity-50"
-            >
-              <RefreshCw className={`h-3 w-3 ${liveQuery.isFetching ? "animate-spin" : ""}`} />
-              {liveQuery.isFetching
-                ? "Refreshing"
-                : cooldownRemaining > 0
-                  ? `Wait ${cooldownRemaining}s`
-                  : "Refresh"}
-            </button>
-            {apiError && (
-              <span className="flex items-center gap-1.5 rounded-full bg-destructive/15 px-2.5 py-1 font-bold uppercase tracking-wider text-destructive" title={apiError}>
-                API error
-              </span>
-            )}
             {liveCount > 0 && (
               <span className="flex items-center gap-1.5 rounded-full bg-destructive/15 px-2.5 py-1 font-bold uppercase tracking-wider text-destructive">
                 <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-destructive" />
@@ -194,15 +142,9 @@ function Dashboard() {
 
           {filtered.length === 0 ? (
             <div className="rounded-xl border border-dashed border-border bg-card/40 px-6 py-16 text-center">
-              <p className="font-display text-lg font-semibold">
-                {apiError ? "Live data unavailable" : "No matches currently past the 65th minute"}
-              </p>
+              <p className="font-display text-lg font-semibold">No matches found</p>
               <p className="mt-1 text-sm text-muted-foreground">
-                {liveQuery.isFetching
-                  ? "Checking live fixtures…"
-                  : apiError
-                    ? apiError
-                    : "Check back closer to full-time for in-play matches with settled odds."}
+                Try selecting more leagues or clearing the filter.
               </p>
             </div>
           ) : (

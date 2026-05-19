@@ -1,62 +1,26 @@
 ## Goal
 
-Swap the live data source from RapidAPI's API-Football to direct `api.sofascore.com` endpoints, and cut request volume by skipping any league that (a) has no fixture scheduled today, AND (b) is not in its final stretch of the season.
+Replace the current mock fixtures in `src/data/matches.ts` with a realistic, season run-in dataset for mid-May 2026 — the actual climax week for most top leagues — so every card reflects a plausible matchup with correct teams, league positions, and stakes.
 
-## What changes
+## Approach
 
-### 1. New SofaScore client (`src/lib/football.functions.ts`, full rewrite of the fetch layer)
-
-- Drop `RAPIDAPI_FOOTBALL_KEY` and all `api-football-v1.p.rapidapi.com` calls.
-- New base: `https://api.sofascore.com/api/v1/...` with browser-like headers (`User-Agent`, `Accept: application/json`, `Origin: https://www.sofascore.com`, `Referer: https://www.sofascore.com/`) — required or Cloudflare returns 403.
-- Keep the existing throttled queue (`MIN_GAP_MS`, `COOLDOWN_MS`, `DAILY_BUDGET`) and per-isolate cache, retuned for SofaScore's looser limits (raise `DAILY_BUDGET` to ~500, lower `MIN_GAP_MS` to ~2s). 429 → cooldown 60s, 403 → cooldown 24h with a clear "SofaScore is blocking this IP" error.
-- Endpoints used:
-  - `sport/football/scheduled-events/{YYYY-MM-DD}` — one call/day, cached 6h. Source of today's fixtures.
-  - `unique-tournament/{id}/season/{seasonId}/events/last/0` and `.../events/next/0` — used once per league per day to determine total rounds + current round (drives "final stretch" detection). Cached 24h.
-  - `unique-tournament/{id}/season/{seasonId}/standings/total` — standings table. Cached 24h.
-  - `sport/football/events/live` — live fixtures, cached 5min, replaces `fixtures?live=all`.
-
-### 2. League ID map
-
-- Replace `API_LEAGUE` with `SOFA_LEAGUE`: `{ tournamentId, seasonId }` per internal league id. Populated once from SofaScore's `unique-tournament/{slug}` lookup (hardcoded based on current season, same approach we already use). Same 25 leagues.
-
-### 3. "Final fixtures" gating (the request-saving rule)
-
-A league is **eligible to poll** today only if EITHER:
-- **Has a fixture today**: appears in today's `scheduled-events` payload, OR
-- **In final stretch**: `currentRound >= totalRounds - 4` (last 5 matchdays).
-
-Implementation:
-- `getEligibleLeagues()` runs once per request, returns the intersection of user-selected leagues and the eligibility set.
-- Live fixtures are filtered to eligible leagues only.
-- Standings are fetched only for eligible leagues that also have a qualifying live match (already past 65').
-- A league that fails the gate contributes zero API calls that day.
-
-### 4. Live filter rules (unchanged)
-
-- `minute >= 65`
-- in-play statuses (`status.type === "inprogress"` + SofaScore's `status.code` in the 2H/ET set)
-- league in eligible set
-
-### 5. Match DTO + threshold logic
-
-- Unchanged. `computeStakes`, `computeThreshold`, `buildLabel`, `buildExplainer` keep working — just fed from SofaScore standings rows (`team.id`, `position`, `points`, `pointsByRank`).
-
-### 6. UI (`src/routes/index.tsx`, `src/components/MatchCard.tsx`)
-
-- No visible changes. Error strings updated: "API-Football" → "SofaScore". The 403 hint changes to "SofaScore is blocking requests from this server — try again later".
-
-### 7. Secrets
-
-- No new secret required (direct SofaScore endpoints don't need a key).
-- `RAPIDAPI_FOOTBALL_KEY` is left in place but unused; safe to delete from project secrets after this lands.
-
-## Risk notes (plain)
-
-- SofaScore has no public API and may block server IPs at any time. If 403s start happening from the Cloudflare Worker, the cooldown will kick in and the page will show the new "blocking" message; the fix at that point is either to use a proxy or move to a paid provider. I'll add a clear error so this is obvious instead of silent.
-- The "final stretch" check needs `currentRound` + `totalRounds`. SofaScore provides both on each season object; if a league doesn't expose rounds (cup-style), it falls back to "must have fixture today" only.
+1. **Research current standings** (websearch) for each of the 25 leagues to pull near-final 2025-26 table positions for relegation zone, title race, and continental qualification spots. Sources: official league sites, ESPN, BBC, transfermarkt.
+2. **Rewrite `src/data/matches.ts`** with ~32–40 matches dated within May 9–24, 2026, ensuring:
+   - Real club names that actually play in each league this season (e.g. Leicester is in Championship 25-26, not PL).
+   - League positions reflect the actual current table (within reason).
+   - `stakesLabel` and `stakesExplainer` use accurate point gaps and consequences.
+   - Every category (relegation / title-promotion / continental) is well-represented across Europe, Latin America, Asia.
+   - Note: many Latin American leagues (Brasileirão, Liga MX Clausura) and Asian leagues (J1) are on different calendars — use fixtures appropriate to their May 2026 state (e.g. Brasileirão early-season, Liga MX Clausura playoffs, J1 mid-season ACL spots).
+3. **Update `src/data/leagues.ts`** only if any team primary colors are missing for newly introduced clubs.
+4. **Quiet fix**: the hydration mismatch on match times (server vs. client timezone formatting in `MatchCard.tsx`) — render times in a fixed timezone (UTC) or pre-format the string in the data layer so SSR and client agree.
 
 ## Out of scope
 
-- No UI redesign.
-- No changes to threshold math, refresh button behavior, or auto-refetch intervals.
-- No new secrets, no Supabase changes.
+- No API integration, no schema changes, no UI/layout changes.
+- Filtering, sidebar, and components remain untouched.
+
+## Technical notes
+
+- Keep the existing `Match` interface as-is so components don't need edits.
+- For each league, include 1–2 matches; prioritize the leagues with the most dramatic late-season stakes (PL, La Liga, Serie A, Bundesliga, Ligue 1, Championship, Eredivisie, Primeira, Liga MX, Brasileirão, MLS, Saudi Pro, J1).
+- Time fix: format `match.date` with `toLocaleTimeString('en-US', { timeZone: 'UTC', ... })` so SSR (UTC) matches client.
