@@ -1,11 +1,15 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useMemo, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { useServerFn } from "@tanstack/react-start";
 import { LEAGUES } from "@/data/leagues";
-import { MATCHES } from "@/data/matches";
+import { getUpcomingFixtures, type FixtureDTO } from "@/lib/fixtures.functions";
 import { LeagueSidebar } from "@/components/LeagueSidebar";
 import { StakeFilter, type StakeFilterValue } from "@/components/StakeFilter";
 import { MatchCard } from "@/components/MatchCard";
+import { Skeleton } from "@/components/ui/skeleton";
 import { Flame, Search } from "lucide-react";
+import type { Match } from "@/data/matches";
 
 export const Route = createFileRoute("/")({
   head: () => ({
@@ -33,6 +37,15 @@ function Dashboard() {
   const [stakeFilter, setStakeFilter] = useState<StakeFilterValue>("all");
   const [query, setQuery] = useState("");
 
+  const fetchFixtures = useServerFn(getUpcomingFixtures);
+  const leagueIdsKey = useMemo(() => [...selectedLeagues].sort().join(","), [selectedLeagues]);
+
+  const { data: fixtures = [], isLoading } = useQuery<FixtureDTO[]>({
+    queryKey: ["fixtures", leagueIdsKey],
+    queryFn: () => fetchFixtures({ data: { leagueIds: [...selectedLeagues] } }),
+    staleTime: 5 * 60 * 1000,
+  });
+
   const toggleLeague = (id: string) => {
     setSelectedLeagues((prev) => {
       const next = new Set(prev);
@@ -42,21 +55,14 @@ function Dashboard() {
     });
   };
 
-  const byLeague = useMemo(
-    () => MATCHES.filter((m) => selectedLeagues.has(m.leagueId)),
-    [selectedLeagues],
-  );
-
   const counts = useMemo(() => {
-    const c = { all: byLeague.length, relegation: 0, title: 0, continental: 0 };
-    for (const m of byLeague) {
-      for (const s of m.stakes) c[s]++;
-    }
+    const c = { all: fixtures.length, relegation: 0, title: 0, continental: 0 };
+    for (const m of fixtures) for (const s of m.stakes) c[s]++;
     return c as Record<StakeFilterValue, number>;
-  }, [byLeague]);
+  }, [fixtures]);
 
   const filtered = useMemo(() => {
-    let list = byLeague;
+    let list = fixtures;
     if (stakeFilter !== "all") list = list.filter((m) => m.stakes.includes(stakeFilter));
     if (query.trim()) {
       const q = query.toLowerCase();
@@ -67,17 +73,11 @@ function Dashboard() {
           m.stakesLabel.toLowerCase().includes(q),
       );
     }
-    return [...list].sort((a, b) => {
-      if (a.status !== b.status) return a.status === "live" ? -1 : 1;
-      return new Date(a.date).getTime() - new Date(b.date).getTime();
-    });
-  }, [byLeague, stakeFilter, query]);
-
-  const liveCount = filtered.filter((m) => m.status === "live").length;
+    return list;
+  }, [fixtures, stakeFilter, query]);
 
   return (
     <div className="min-h-screen bg-background text-foreground">
-      {/* Topbar */}
       <header className="sticky top-0 z-20 h-16 border-b border-border bg-card/80 backdrop-blur">
         <div className="flex h-full items-center justify-between px-5">
           <div className="flex items-center gap-3">
@@ -91,9 +91,7 @@ function Dashboard() {
               <h1 className="font-display text-lg font-bold leading-none tracking-tight">
                 Stakes<span className="text-primary">FC</span>
               </h1>
-              <p className="text-[11px] text-muted-foreground">
-                Only the matches that matter
-              </p>
+              <p className="text-[11px] text-muted-foreground">Only the matches that matter</p>
             </div>
           </div>
 
@@ -108,14 +106,8 @@ function Dashboard() {
           </div>
 
           <div className="flex items-center gap-2 text-xs">
-            {liveCount > 0 && (
-              <span className="flex items-center gap-1.5 rounded-full bg-destructive/15 px-2.5 py-1 font-bold uppercase tracking-wider text-destructive">
-                <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-destructive" />
-                {liveCount} Live
-              </span>
-            )}
             <span className="rounded-full bg-secondary px-2.5 py-1 font-semibold text-secondary-foreground">
-              {filtered.length} matches
+              {filtered.length} / 5 matches
             </span>
           </div>
         </div>
@@ -132,7 +124,7 @@ function Dashboard() {
           <div className="mb-6">
             <h2 className="font-display text-2xl font-bold">Match Feed</h2>
             <p className="mt-1 text-sm text-muted-foreground">
-              Filter by what's on the line — relegation, the title, or a continental spot.
+              The 5 soonest upcoming high-stakes games across your selected leagues. Refreshed daily.
             </p>
           </div>
 
@@ -140,17 +132,25 @@ function Dashboard() {
             <StakeFilter value={stakeFilter} onChange={setStakeFilter} counts={counts} />
           </div>
 
-          {filtered.length === 0 ? (
+          {isLoading ? (
+            <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
+              {Array.from({ length: 4 }).map((_, i) => (
+                <Skeleton key={i} className="h-56 w-full rounded-xl" />
+              ))}
+            </div>
+          ) : filtered.length === 0 ? (
             <div className="rounded-xl border border-dashed border-border bg-card/40 px-6 py-16 text-center">
-              <p className="font-display text-lg font-semibold">No matches found</p>
+              <p className="font-display text-lg font-semibold">No fixtures yet</p>
               <p className="mt-1 text-sm text-muted-foreground">
-                Try selecting more leagues or clearing the filter.
+                The cache may still be warming up. Trigger a sync by POSTing to{" "}
+                <code className="rounded bg-muted px-1.5 py-0.5 text-xs">/api/public/sync-fixtures</code>{" "}
+                with your project apikey header, or wait for the daily cron.
               </p>
             </div>
           ) : (
             <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
               {filtered.map((m) => (
-                <MatchCard key={m.id} match={m} />
+                <MatchCard key={m.id} match={m as unknown as Match} />
               ))}
             </div>
           )}
