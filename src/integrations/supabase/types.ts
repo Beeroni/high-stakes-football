@@ -14,7 +14,99 @@ export type Database = {
   }
   public: {
     Tables: {
-      [_ in never]: never
+      fixtures_cache: {
+        Row: {
+          away_color: string | null
+          away_points: number | null
+          away_position: number | null
+          away_short: string
+          away_team: string
+          home_color: string | null
+          home_points: number | null
+          home_position: number | null
+          home_short: string
+          home_team: string
+          id: string
+          kickoff_utc: string
+          league_id: string
+          stakes: string[]
+          stakes_explainer: string
+          stakes_label: string
+          status: string
+          synced_at: string
+        }
+        Insert: {
+          away_color?: string | null
+          away_points?: number | null
+          away_position?: number | null
+          away_short: string
+          away_team: string
+          home_color?: string | null
+          home_points?: number | null
+          home_position?: number | null
+          home_short: string
+          home_team: string
+          id: string
+          kickoff_utc: string
+          league_id: string
+          stakes?: string[]
+          stakes_explainer?: string
+          stakes_label?: string
+          status?: string
+          synced_at?: string
+        }
+        Update: {
+          away_color?: string | null
+          away_points?: number | null
+          away_position?: number | null
+          away_short?: string
+          away_team?: string
+          home_color?: string | null
+          home_points?: number | null
+          home_position?: number | null
+          home_short?: string
+          home_team?: string
+          id?: string
+          kickoff_utc?: string
+          league_id?: string
+          stakes?: string[]
+          stakes_explainer?: string
+          stakes_label?: string
+          status?: string
+          synced_at?: string
+        }
+        Relationships: []
+      }
+      standings_cache: {
+        Row: {
+          league_id: string
+          played: number
+          points: number
+          position: number
+          synced_at: string
+          team_color: string | null
+          team_name: string
+        }
+        Insert: {
+          league_id: string
+          played?: number
+          points?: number
+          position: number
+          synced_at?: string
+          team_color?: string | null
+          team_name: string
+        }
+        Update: {
+          league_id?: string
+          played?: number
+          points?: number
+          position?: number
+          synced_at?: string
+          team_color?: string | null
+          team_name?: string
+        }
+        Relationships: []
+      }
     }
     Views: {
       [_ in never]: never
