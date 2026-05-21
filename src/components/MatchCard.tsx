@@ -7,24 +7,43 @@ import { Calendar, Radio } from "lucide-react";
 export function MatchCard({ match }: { match: Match }) {
   const league = LEAGUES.find((l) => l.id === match.leagueId)!;
   const date = new Date(match.date);
-  // Use fixed locale + UTC so SSR and client render identical strings (no hydration mismatch).
-  const dateStr = date.toLocaleDateString("en-GB", { weekday: "short", month: "short", day: "numeric", timeZone: "UTC" });
-  const timeStr = date.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", timeZone: "UTC", hour12: false }) + " UTC";
+  // Athens time (Europe/Athens). Fixed locale so SSR matches client.
+  const tz = "Europe/Athens";
+  const dateStr = date.toLocaleDateString("en-GB", { weekday: "short", month: "short", day: "numeric", timeZone: tz });
+  const timeStr =
+    date.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", timeZone: tz, hour12: false }) +
+    " Athens";
+  const isLive = match.status === "live";
+  const isKnockout = (match as unknown as { isKnockout?: boolean }).isKnockout;
+  const roundLabel = (match as unknown as { roundLabel?: string | null }).roundLabel;
 
   return (
-    <article className="group relative overflow-hidden rounded-xl border border-border bg-card transition hover:border-primary/40 hover:shadow-[0_0_0_1px_var(--primary)]/20">
+    <article
+      className={
+        "group relative overflow-hidden rounded-xl border bg-card transition " +
+        (isLive
+          ? "border-destructive/60 shadow-[0_0_0_1px_var(--destructive)]/40 ring-1 ring-destructive/30"
+          : "border-border hover:border-primary/40 hover:shadow-[0_0_0_1px_var(--primary)]/20")
+      }
+    >
       {/* Header */}
-      <div className="flex items-center justify-between border-b border-border/60 bg-secondary/40 px-4 py-2.5">
+      <div className={"flex items-center justify-between border-b border-border/60 px-4 py-2.5 " + (isLive ? "bg-destructive/10" : "bg-secondary/40")}>
         <div className="flex items-center gap-2 text-xs text-muted-foreground">
           <span className="text-base leading-none">{league.flag}</span>
           <span className="font-medium text-foreground/80">{league.name}</span>
           <span className="opacity-50">·</span>
           <span>{league.country}</span>
+          {roundLabel && (
+            <>
+              <span className="opacity-50">·</span>
+              <span className="opacity-80">{roundLabel}</span>
+            </>
+          )}
         </div>
-        {match.status === "live" ? (
-          <span className="flex items-center gap-1.5 rounded-full bg-destructive/15 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-destructive">
+        {isLive ? (
+          <span className="flex items-center gap-1.5 rounded-full bg-destructive px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-destructive-foreground">
             <Radio className="h-3 w-3 animate-pulse" />
-            Live · {match.liveMinute}'
+            Live{match.liveMinute != null ? ` · ${match.liveMinute}${/^\d+$/.test(String(match.liveMinute)) ? "'" : ""}` : ""}
           </span>
         ) : (
           <span className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
@@ -36,8 +55,13 @@ export function MatchCard({ match }: { match: Match }) {
 
       {/* Stakes badges */}
       <div className="flex flex-wrap gap-1.5 px-4 pt-3">
+        {isKnockout && (
+          <span className="inline-flex items-center gap-1.5 rounded-md border border-title/40 bg-title/15 px-2.5 py-1 text-xs font-semibold text-title">
+            ⚔️ Promotion/Relegation Knockout
+          </span>
+        )}
         {match.stakes.map((s, i) => (
-          <StakeBadge key={s} type={s} label={i === 0 ? match.stakesLabel : undefined} />
+          <StakeBadge key={s} type={s} label={i === 0 && !isKnockout ? match.stakesLabel : undefined} />
         ))}
       </div>
 

@@ -7,12 +7,17 @@ const BASE = "https://www.thesportsdb.com/api/v1/json/3";
 interface TSDBEvent {
   idEvent: string;
   idLeague: string;
+  strEvent?: string | null;
   strHomeTeam: string;
   strAwayTeam: string;
   strTimestamp?: string | null;
   dateEvent?: string | null;
   strTime?: string | null;
   strStatus?: string | null;
+  strProgress?: string | null;
+  intHomeScore?: string | number | null;
+  intAwayScore?: string | number | null;
+  strRound?: string | null;
 }
 
 interface TSDBStandingRow {
@@ -21,6 +26,22 @@ interface TSDBStandingRow {
   intRank: number | string;
   intPoints: number | string;
   intPlayed: number | string;
+}
+
+/** Normalize team names so "Deportivo Alavés" matches "Alavés", "Brighton and Hove Albion" matches "Brighton", etc. */
+function normalize(name: string): string {
+  return name
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "") // strip accents
+    .toLowerCase()
+    .replace(/\b(fc|cf|sc|ac|club|deportivo|cd|ca|afc|cfc|sk|fk|bk|if|ud|real|sociedad|de|and|hove|albion)\b/g, " ")
+    .replace(/[^a-z0-9 ]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function nameTokens(name: string): string[] {
+  return normalize(name).split(" ").filter((t) => t.length >= 3);
 }
 
 function shortName(name: string): string {
@@ -50,13 +71,63 @@ interface StandingEntry {
   points: number;
   played: number;
   name: string;
+  norm: string;
+  tokens: string[];
+}
+
+function findTeam(rawName: string, table: StandingEntry[]): StandingEntry | undefined {
+  if (table.length === 0) return undefined;
+  const norm = normalize(rawName);
+  if (!norm) return undefined;
+  // 1. exact normalized match
+  let hit = table.find((t) => t.norm === norm);
+  if (hit) return hit;
+  // 2. substring either direction
+  hit = table.find((t) => t.norm.includes(norm) || norm.includes(t.norm));
+  if (hit) return hit;
+  // 3. token overlap
+  const tokens = nameTokens(rawName);
+  if (tokens.length === 0) return undefined;
+  let best: { team: StandingEntry; score: number } | undefined;
+  for (const t of table) {
+    const overlap = tokens.filter((tok) => t.tokens.includes(tok)).length;
+    if (overlap > 0 && (!best || overlap > best.score)) best = { team: t, score: overlap };
+  }
+  return best?.team;
+}
+
+function detectKnockout(ev: TSDBEvent): boolean {
+  const blob = `${ev.strRound ?? ""} ${ev.strEvent ?? ""}`.toLowerCase();
+  return /play\s*-?\s*off|playoff|knockout|relegation|promotion|final|semi|quarter/.test(blob);
+}
+
+function detectLive(ev: TSDBEvent): { isLive: boolean; minute: string | null } {
+  const status = (ev.strStatus ?? "").toUpperCase();
+  const progress = (ev.strProgress ?? "").trim();
+  const liveStatuses = ["1H", "2H", "HT", "ET", "P", "LIVE", "IN PLAY", "BREAK"];
+  if (status === "FT" || status === "AET" || status === "PEN" || status === "FINISHED") {
+    return { isLive: false, minute: null };
+  }
+  if (liveStatuses.includes(status) || (progress && progress !== "0")) {
+    return { isLive: true, minute: progress || status || "LIVE" };
+  }
+  return { isLive: false, minute: null };
 }
 
 function inferStakes(
   league: League,
   team: StandingEntry | undefined,
   table: StandingEntry[],
+  isKnockout: boolean,
 ): { stakes: StakeType[]; label: string; explainer: string } {
+  if (isKnockout) {
+    const blob = team?.name ?? "";
+    return {
+      stakes: ["relegation"],
+      label: "Knockout tie",
+      explainer: `Promotion/relegation playoff. Loser drops out of the division${blob ? `; ${blob} fighting for survival` : ""}.`,
+    };
+  }
   if (!team || table.length === 0) {
     return { stakes: [], label: "Fixture", explainer: "League table data unavailable." };
   }
@@ -64,16 +135,9 @@ function inferStakes(
   const total = table.length || league.size;
   const pos = team.position;
 
-  // Title race: top 2
   if (pos <= 2) stakes.push("title");
-  // Continental qualification: positions 3..continentalSlots
-  else if (league.continentalSlots > 0 && pos <= league.continentalSlots) {
-    stakes.push("continental");
-  }
-  // Relegation zone or just above
-  if (league.relegationSlots > 0 && pos >= total - league.relegationSlots - 1) {
-    stakes.push("relegation");
-  }
+  else if (league.continentalSlots > 0 && pos <= league.continentalSlots) stakes.push("continental");
+  if (league.relegationSlots > 0 && pos >= total - league.relegationSlots - 1) stakes.push("relegation");
 
   let label = "Mid-table clash";
   let explainer = `${team.name} sit ${ordinal(pos)} with ${team.points} pts.`;
@@ -88,16 +152,15 @@ function inferStakes(
         : `${team.name} are ${gap} pt${gap === 1 ? "" : "s"} behind leaders ${leader.name}. Every dropped point could decide the title.`;
   } else if (stakes.includes("continental")) {
     label = "Continental spot";
-    explainer = `${team.name} are ${ordinal(pos)}, fighting for a continental qualification place.`;
+    explainer = `${team.name} are ${ordinal(pos)} on ${team.points} pts, fighting for a continental qualification place.`;
   } else if (stakes.includes("relegation")) {
     const dropLine = total - league.relegationSlots;
-    const safeTeam = table[dropLine - 1];
-    const cushion = safeTeam ? team.points - (table[dropLine]?.points ?? 0) : 0;
+    const cushion = team.points - (table[dropLine]?.points ?? 0);
     label = "Relegation battle";
     explainer =
       pos > dropLine
-        ? `${team.name} sit ${ordinal(pos)} — inside the relegation zone. They need points to climb out.`
-        : `${team.name} are just above the drop with only a ${cushion}-pt cushion. A loss could send them into the relegation zone.`;
+        ? `${team.name} sit ${ordinal(pos)} on ${team.points} pts — inside the relegation zone. They need points to climb out.`
+        : `${team.name} are ${ordinal(pos)} on ${team.points} pts, just above the drop with only a ${cushion}-pt cushion.`;
   }
 
   return { stakes, label, explainer };
@@ -119,6 +182,8 @@ async function syncLeague(league: League): Promise<{ league: string; fixtures: n
     points: Number(r.intPoints),
     played: Number(r.intPlayed),
     name: r.strTeam,
+    norm: normalize(r.strTeam),
+    tokens: nameTokens(r.strTeam),
   }));
   table.sort((a, b) => a.position - b.position);
 
@@ -135,32 +200,44 @@ async function syncLeague(league: League): Promise<{ league: string; fixtures: n
     );
   }
 
-  // 2. Next fixtures
+  // 2. Next fixtures + live (eventsnextleague includes in-play events too)
   const fixturesRes = await safeFetch<{ events: TSDBEvent[] | null }>(
     `${BASE}/eventsnextleague.php?id=${league.sportsdbId}`,
   );
+  // Also pull livescore for this league so currently-running matches get scores
+  const liveRes = await safeFetch<{ events: TSDBEvent[] | null }>(
+    `${BASE}/livescore.php?l=${league.sportsdbId}`,
+  );
+  const liveById = new Map<string, TSDBEvent>();
+  for (const e of liveRes?.events ?? []) liveById.set(e.idEvent, e);
+
   const events = fixturesRes?.events ?? [];
 
-  const tableByName = new Map(table.map((t) => [t.name.toLowerCase(), t]));
-
   const rows = events
-    .map((ev) => {
+    .map((evRaw) => {
+      const ev = { ...evRaw, ...(liveById.get(evRaw.idEvent) ?? {}) };
       const kickoff =
         ev.strTimestamp ??
         (ev.dateEvent && ev.strTime ? `${ev.dateEvent}T${ev.strTime}Z` : null);
       if (!kickoff) return null;
-      const home = tableByName.get(ev.strHomeTeam.toLowerCase());
-      const away = tableByName.get(ev.strAwayTeam.toLowerCase());
+
+      const home = findTeam(ev.strHomeTeam, table);
+      const away = findTeam(ev.strAwayTeam, table);
+      const isKnockout = detectKnockout(ev);
+      const { isLive, minute } = detectLive(ev);
+
       const focus = (() => {
         if (!home && !away) return undefined;
         if (!home) return away;
         if (!away) return home;
-        // Prefer the more dramatic team
-        const homeStakes = inferStakes(league, home, table).stakes.length;
-        const awayStakes = inferStakes(league, away, table).stakes.length;
+        const homeStakes = inferStakes(league, home, table, false).stakes.length;
+        const awayStakes = inferStakes(league, away, table, false).stakes.length;
         return awayStakes > homeStakes ? away : home;
       })();
-      const { stakes, label, explainer } = inferStakes(league, focus, table);
+      const { stakes, label, explainer } = inferStakes(league, focus, table, isKnockout);
+
+      const homeScore = ev.intHomeScore != null && ev.intHomeScore !== "" ? Number(ev.intHomeScore) : null;
+      const awayScore = ev.intAwayScore != null && ev.intAwayScore !== "" ? Number(ev.intAwayScore) : null;
 
       return {
         id: ev.idEvent,
@@ -175,8 +252,13 @@ async function syncLeague(league: League): Promise<{ league: string; fixtures: n
         away_points: away?.points ?? null,
         home_color: null,
         away_color: null,
+        home_score: homeScore,
+        away_score: awayScore,
+        live_minute: minute,
+        is_knockout: isKnockout,
+        round_label: ev.strRound ?? null,
         kickoff_utc: new Date(kickoff).toISOString(),
-        status: "upcoming",
+        status: isLive ? "live" : "upcoming",
         stakes,
         stakes_label: label,
         stakes_explainer: explainer,
@@ -194,19 +276,16 @@ async function syncLeague(league: League): Promise<{ league: string; fixtures: n
 
 export async function syncAllLeagues() {
   const results: Array<{ league: string; fixtures: number; standings: number }> = [];
-  // Sequential to be gentle on TheSportsDB rate limits
   for (const league of LEAGUES) {
     try {
       const r = await syncLeague(league);
       results.push(r);
-      // small delay
       await new Promise((res) => setTimeout(res, 250));
     } catch (e) {
       console.error("[sync] league failed", league.id, e);
     }
   }
 
-  // Prune past fixtures
   await supabaseAdmin
     .from("fixtures_cache")
     .delete()

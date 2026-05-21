@@ -106,8 +106,14 @@ function Dashboard() {
           </div>
 
           <div className="flex items-center gap-2 text-xs">
+            {filtered.some((m) => m.status === "live") && (
+              <span className="flex items-center gap-1.5 rounded-full bg-destructive px-2.5 py-1 font-bold uppercase tracking-wider text-destructive-foreground">
+                <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-white" />
+                {filtered.filter((m) => m.status === "live").length} Live
+              </span>
+            )}
             <span className="rounded-full bg-secondary px-2.5 py-1 font-semibold text-secondary-foreground">
-              {filtered.length} / 5 matches
+              {filtered.filter((m) => m.status !== "live").length} / 5 upcoming
             </span>
           </div>
         </div>
@@ -148,10 +154,32 @@ function Dashboard() {
               </p>
             </div>
           ) : (
-            <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
-              {filtered.map((m) => (
-                <MatchCard key={m.id} match={m as unknown as Match} />
-              ))}
+            <div className="space-y-8">
+              {filtered.some((m) => m.status === "live") && (
+                <section>
+                  <h3 className="mb-3 flex items-center gap-2 font-display text-sm font-bold uppercase tracking-wider text-destructive">
+                    <span className="h-2 w-2 animate-pulse rounded-full bg-destructive" />
+                    Live Now
+                  </h3>
+                  <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
+                    {filtered.filter((m) => m.status === "live").map((m) => (
+                      <MatchCard key={m.id} match={m as unknown as Match} />
+                    ))}
+                  </div>
+                </section>
+              )}
+              {filtered.some((m) => m.status !== "live") && (
+                <section>
+                  <h3 className="mb-3 font-display text-sm font-bold uppercase tracking-wider text-muted-foreground">
+                    Next 5 Upcoming
+                  </h3>
+                  <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
+                    {filtered.filter((m) => m.status !== "live").map((m) => (
+                      <MatchCard key={m.id} match={m as unknown as Match} />
+                    ))}
+                  </div>
+                </section>
+              )}
             </div>
           )}
         </main>

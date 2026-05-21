@@ -19,16 +19,21 @@ export type Database = {
           away_color: string | null
           away_points: number | null
           away_position: number | null
+          away_score: number | null
           away_short: string
           away_team: string
           home_color: string | null
           home_points: number | null
           home_position: number | null
+          home_score: number | null
           home_short: string
           home_team: string
           id: string
+          is_knockout: boolean
           kickoff_utc: string
           league_id: string
+          live_minute: string | null
+          round_label: string | null
           stakes: string[]
           stakes_explainer: string
           stakes_label: string
@@ -39,16 +44,21 @@ export type Database = {
           away_color?: string | null
           away_points?: number | null
           away_position?: number | null
+          away_score?: number | null
           away_short: string
           away_team: string
           home_color?: string | null
           home_points?: number | null
           home_position?: number | null
+          home_score?: number | null
           home_short: string
           home_team: string
           id: string
+          is_knockout?: boolean
           kickoff_utc: string
           league_id: string
+          live_minute?: string | null
+          round_label?: string | null
           stakes?: string[]
           stakes_explainer?: string
           stakes_label?: string
@@ -59,16 +69,21 @@ export type Database = {
           away_color?: string | null
           away_points?: number | null
           away_position?: number | null
+          away_score?: number | null
           away_short?: string
           away_team?: string
           home_color?: string | null
           home_points?: number | null
           home_position?: number | null
+          home_score?: number | null
           home_short?: string
           home_team?: string
           id?: string
+          is_knockout?: boolean
           kickoff_utc?: string
           league_id?: string
+          live_minute?: string | null
+          round_label?: string | null
           stakes?: string[]
           stakes_explainer?: string
           stakes_label?: string
