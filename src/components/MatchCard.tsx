@@ -7,9 +7,15 @@ import { Calendar, Radio } from "lucide-react";
 export function MatchCard({ match }: { match: Match }) {
   const league = LEAGUES.find((l) => l.id === match.leagueId)!;
   const date = new Date(match.date);
-  // Use fixed locale + UTC so SSR and client render identical strings (no hydration mismatch).
-  const dateStr = date.toLocaleDateString("en-GB", { weekday: "short", month: "short", day: "numeric", timeZone: "UTC" });
-  const timeStr = date.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", timeZone: "UTC", hour12: false }) + " UTC";
+  // Athens time (Europe/Athens). Fixed locale so SSR matches client.
+  const tz = "Europe/Athens";
+  const dateStr = date.toLocaleDateString("en-GB", { weekday: "short", month: "short", day: "numeric", timeZone: tz });
+  const timeStr =
+    date.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", timeZone: tz, hour12: false }) +
+    " Athens";
+  const isLive = match.status === "live";
+  const isKnockout = (match as unknown as { isKnockout?: boolean }).isKnockout;
+  const roundLabel = (match as unknown as { roundLabel?: string | null }).roundLabel;
 
   return (
     <article className="group relative overflow-hidden rounded-xl border border-border bg-card transition hover:border-primary/40 hover:shadow-[0_0_0_1px_var(--primary)]/20">
