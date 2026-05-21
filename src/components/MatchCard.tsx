@@ -43,7 +43,7 @@ export function MatchCard({ match }: { match: Match }) {
         {isLive ? (
           <span className="flex items-center gap-1.5 rounded-full bg-destructive px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-destructive-foreground">
             <Radio className="h-3 w-3 animate-pulse" />
-            Live{match.liveMinute ? ` · ${match.liveMinute}${/^\d+$/.test(match.liveMinute) ? "'" : ""}` : ""}
+            Live{match.liveMinute != null ? ` · ${match.liveMinute}${/^\d+$/.test(String(match.liveMinute)) ? "'" : ""}` : ""}
           </span>
         ) : (
           <span className="flex items-center gap-1.5 text-[11px] text-muted-foreground">

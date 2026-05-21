@@ -5,7 +5,7 @@ export interface Match {
   leagueId: string;
   date: string; // ISO
   status: "upcoming" | "live";
-  liveMinute?: number;
+  liveMinute?: number | string | null;
   homeScore?: number;
   awayScore?: number;
   home: { name: string; short: string; position: number; points: number; color: string };
